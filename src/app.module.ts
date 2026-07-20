@@ -5,6 +5,7 @@ import { AppService } from './app.service';
 import { DatabaseModule } from './database/database.module';
 import { SupabaseModule } from './supabase/supabase.module';
 import { RepoModule } from './repo/repo.module';
+import { VersionModule } from './version/version.module';
 
 @Module({
   imports: [
@@ -12,6 +13,7 @@ import { RepoModule } from './repo/repo.module';
     DatabaseModule,
     SupabaseModule,
     RepoModule,
+    VersionModule,
   ],
   controllers: [AppController],
   providers: [AppService],

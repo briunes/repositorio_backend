@@ -365,3 +365,11 @@ model AuditLog {
   @@index([actorId, createdAt])
   @@map("audit_logs")
 }
+
+model SystemConfig {
+  id         String   @id @default("default")
+  appVersion String   @default("1.0.0") @map("app_version") @db.VarChar(40)
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@map("system_config")
+}

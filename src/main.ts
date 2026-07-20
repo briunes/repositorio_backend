@@ -10,6 +10,12 @@ async function bootstrap() {
       origin.trim(),
     ) ?? ['http://localhost:3000'],
     credentials: true,
+    allowedHeaders: [
+      'Accept',
+      'Authorization',
+      'Content-Type',
+      'X-Repositorio-App-Version',
+    ],
   });
   await app.listen(process.env.PORT ?? 3000);
 }
