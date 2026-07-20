@@ -2,7 +2,6 @@ import {
   Body,
   Controller,
   Get,
-  Header,
   Headers,
   Param,
   Post,
@@ -35,10 +34,6 @@ export class RepoController {
   }
 
   @Get('filters')
-  @Header(
-    'Cache-Control',
-    'public, max-age=0, s-maxage=60, stale-while-revalidate=300',
-  )
   filters() {
     return this.repo.filters();
   }
