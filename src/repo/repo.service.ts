@@ -33,8 +33,8 @@ export class RepoService {
       method: 'POST',
       body: JSON.stringify(body),
     });
-    await this.syncLoggedInUser(response);
-    return response;
+    const appRole = await this.syncLoggedInUser(response);
+    return this.withAppRole(response, appRole);
   }
 
   refresh(body: JsonObject) {
@@ -329,13 +329,13 @@ export class RepoService {
     return payload;
   }
 
-  private async syncLoggedInUser(payload: unknown) {
+  private async syncLoggedInUser(payload: unknown): Promise<string | undefined> {
     if (
       !this.isObject(payload) ||
       !this.isObject(payload.data) ||
       !this.isObject(payload.data.user)
     )
-      return;
+      return undefined;
     const remoteUser = payload.data.user;
     const rawId = remoteUser.id ?? remoteUser.iUserId;
     const rawUsername = remoteUser.username;
@@ -343,7 +343,7 @@ export class RepoService {
       (typeof rawId !== 'string' && typeof rawId !== 'number') ||
       typeof rawUsername !== 'string'
     )
-      return;
+      return undefined;
     const gboxUserId = String(rawId);
     const existing = await this.prisma.user.findFirst({
       where: { OR: [{ gboxUserId }, { username: rawUsername }] },
@@ -362,18 +362,45 @@ export class RepoService {
           data: values,
         })
       : await this.prisma.user.create({ data: values });
-    if (existing) return;
+    if (existing) {
+      const assignment = await this.prisma.userRole.findFirst({
+        where: { userId: user.id },
+        orderBy: { assignedAt: 'asc' },
+        select: { role: { select: { name: true } } },
+      });
+      return assignment?.role.name;
+    }
 
     const viewerRole = await this.prisma.role.findUnique({
       where: { key: 'viewer' },
-      select: { id: true },
+      select: { id: true, name: true },
     });
-    if (viewerRole)
+    if (viewerRole) {
       await this.prisma.userRole.upsert({
         where: { userId_roleId: { userId: user.id, roleId: viewerRole.id } },
         update: {},
         create: { userId: user.id, roleId: viewerRole.id },
       });
+      return viewerRole.name;
+    }
+    return undefined;
+  }
+
+  private withAppRole(payload: unknown, appRole?: string) {
+    if (
+      !appRole ||
+      !this.isObject(payload) ||
+      !this.isObject(payload.data) ||
+      !this.isObject(payload.data.user)
+    )
+      return payload;
+    return {
+      ...payload,
+      data: {
+        ...payload.data,
+        user: { ...payload.data.user, role: appRole },
+      },
+    };
   }
 
   private unwrapTemplates(payload: unknown): GboxTemplates {
