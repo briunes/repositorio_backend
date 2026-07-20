@@ -120,6 +120,29 @@ export class AdminService {
     return { status: true, data };
   }
 
+  async settings() {
+    const data = await this.prisma.systemConfig.upsert({
+      where: { id: 'default' },
+      update: {},
+      create: { id: 'default', appVersion: '1.0.0' },
+      select: { appVersion: true, updatedAt: true },
+    });
+    return { status: true, data };
+  }
+
+  async updateVersion(version?: string) {
+    const normalized = version?.trim();
+    if (!normalized || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(normalized))
+      throw new BadRequestException('Indique uma versão válida, por exemplo 1.2.3.');
+    const data = await this.prisma.systemConfig.upsert({
+      where: { id: 'default' },
+      update: { appVersion: normalized },
+      create: { id: 'default', appVersion: normalized },
+      select: { appVersion: true, updatedAt: true },
+    });
+    return { status: true, data };
+  }
+
   private async assertPermissionsExist(model: 'role' | 'permission', ids: string[]) {
     if (!ids.length) return;
     const count = model === 'role'

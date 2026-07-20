@@ -44,4 +44,14 @@ export class AdminController {
   syncRuns() {
     return this.admin.syncRuns();
   }
+
+  @Get('settings')
+  settings() {
+    return this.admin.settings();
+  }
+
+  @Patch('settings/version')
+  updateVersion(@Body() body: { version?: string }) {
+    return this.admin.updateVersion(body.version);
+  }
 }
