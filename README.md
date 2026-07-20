@@ -50,6 +50,16 @@ pnpm db:studio        # inspect/edit local data using Prisma Studio
 pnpm dev:backend      # run only the NestJS API on port 3001
 ```
 
+To publish a frontend build version after deploying that build:
+
+```bash
+npm run app:version -- 1.0.1
+```
+
+Clients send their stored version in `X-Repositorio-App-Version`. A mismatch
+returns HTTP `409` with `APP_VERSION_OUTDATED`, prompting the frontend to clear
+its browser caches and reload with a versioned URL.
+
 ## Authentication integration contract
 
 After GBox validates a login, upsert the local user by `gboxUserId` (or by

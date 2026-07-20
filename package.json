@@ -23,7 +23,8 @@
     "db:deploy": "prisma migrate deploy",
     "db:seed": "prisma db seed",
     "db:import:gbox": "ts-node prisma/import-gbox-snapshot.ts",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "app:version": "ts-node scripts/set-app-version.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",
