@@ -362,6 +362,8 @@ export class RepoService {
           data: values,
         })
       : await this.prisma.user.create({ data: values });
+    if (existing) return;
+
     const viewerRole = await this.prisma.role.findUnique({
       where: { key: 'viewer' },
       select: { id: true },
