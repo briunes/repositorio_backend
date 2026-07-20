@@ -6,6 +6,7 @@ import { DatabaseModule } from './database/database.module';
 import { SupabaseModule } from './supabase/supabase.module';
 import { RepoModule } from './repo/repo.module';
 import { VersionModule } from './version/version.module';
+import { AdminModule } from './admin/admin.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { VersionModule } from './version/version.module';
     SupabaseModule,
     RepoModule,
     VersionModule,
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [AppService],
