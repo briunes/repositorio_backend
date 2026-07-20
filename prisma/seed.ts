@@ -3,16 +3,16 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 
 const permissions = [
-  ['communications.read', 'View communications and their versions'],
-  ['communications.create', 'Create communications'],
-  ['communications.update', 'Edit communications and draft versions'],
-  ['communications.publish', 'Publish and schedule communication versions'],
-  ['communications.archive', 'Archive communications'],
-  ['taxonomy.manage', 'Manage categories, services, teams, tags and channels'],
-  ['users.read', 'View application users'],
-  ['users.manage', 'Activate, block and assign roles to users'],
-  ['roles.manage', 'Manage roles and permissions'],
-  ['audit.read', 'View the audit trail'],
+  ['communications.read', 'Consultar comunicações e respetivas versões'],
+  ['communications.create', 'Criar comunicações'],
+  ['communications.update', 'Editar comunicações e versões em rascunho'],
+  ['communications.publish', 'Publicar e agendar versões de comunicações'],
+  ['communications.archive', 'Arquivar comunicações'],
+  ['taxonomy.manage', 'Gerir categorias, serviços, equipas, etiquetas e canais'],
+  ['users.read', 'Consultar utilizadores da aplicação'],
+  ['users.manage', 'Ativar, bloquear e atribuir funções a utilizadores'],
+  ['roles.manage', 'Gerir funções e permissões'],
+  ['audit.read', 'Consultar o histórico de auditoria'],
 ] as const;
 
 const rolePermissions: Record<string, string[]> = {
@@ -33,14 +33,14 @@ const rolePermissions: Record<string, string[]> = {
 };
 
 const roles = [
-  ['viewer', 'Viewer', 'Can browse the communication repository'],
-  ['editor', 'Editor', 'Can create and edit draft communications'],
+  ['viewer', 'Leitor', 'Pode consultar o repositório de comunicações'],
+  ['editor', 'Editor', 'Pode criar e editar comunicações em rascunho'],
   [
     'publisher',
-    'Publisher',
-    'Can publish, schedule and archive communications',
+    'Publicador',
+    'Pode publicar, agendar e arquivar comunicações',
   ],
-  ['admin', 'Administrator', 'Full application administration'],
+  ['admin', 'Administrador', 'Administração completa da aplicação'],
 ] as const;
 
 const channels = [
