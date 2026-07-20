@@ -1,0 +1,367 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  BLOCKED
+}
+
+enum CommunicationStatus {
+  DRAFT
+  PENDING
+  SCHEDULED
+  AVAILABLE
+  ARCHIVED
+  UNAVAILABLE
+}
+
+enum VersionStatus {
+  DRAFT
+  PENDING
+  SCHEDULED
+  PUBLISHED
+  ARCHIVED
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  PUBLISH
+  ARCHIVE
+  LOGIN
+  LOGOUT
+  SYNC
+}
+
+enum SyncStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+/// Minimal local profile. Authentication remains the responsibility of GBox.
+model User {
+  id              String                 @id @default(cuid())
+  gboxUserId      String?                @unique @map("gbox_user_id")
+  username        String                 @unique @db.VarChar(100)
+  displayName     String?                @map("display_name") @db.VarChar(160)
+  email           String?                @unique @db.VarChar(254)
+  status          UserStatus             @default(ACTIVE)
+  lastLoginAt     DateTime?              @map("last_login_at")
+  createdAt       DateTime               @default(now()) @map("created_at")
+  updatedAt       DateTime               @updatedAt @map("updated_at")
+  roles           UserRole[]
+  favourites      Favourite[]
+  createdVersions CommunicationVersion[] @relation("VersionCreator")
+  auditLogs       AuditLog[]
+
+  @@index([status])
+  @@map("users")
+}
+
+model Role {
+  id          String           @id @default(cuid())
+  key         String           @unique @db.VarChar(80)
+  name        String           @db.VarChar(120)
+  description String?          @db.VarChar(500)
+  isSystem    Boolean          @default(false) @map("is_system")
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+  users       UserRole[]
+  permissions RolePermission[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String           @id @default(cuid())
+  key         String           @unique @db.VarChar(120)
+  description String?          @db.VarChar(500)
+  createdAt   DateTime         @default(now()) @map("created_at")
+  roles       RolePermission[]
+
+  @@map("permissions")
+}
+
+model UserRole {
+  userId     String   @map("user_id")
+  roleId     String   @map("role_id")
+  assignedAt DateTime @default(now()) @map("assigned_at")
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role       Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@index([roleId])
+  @@map("user_roles")
+}
+
+model RolePermission {
+  roleId       String     @map("role_id")
+  permissionId String     @map("permission_id")
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@index([permissionId])
+  @@map("role_permissions")
+}
+
+model Category {
+  id             String                  @id @default(cuid())
+  name           String                  @db.VarChar(120)
+  slug           String                  @unique @db.VarChar(140)
+  description    String?                 @db.VarChar(500)
+  sortOrder      Int                     @default(0) @map("sort_order")
+  isActive       Boolean                 @default(true) @map("is_active")
+  parentId       String?                 @map("parent_id")
+  parent         Category?               @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children       Category[]              @relation("CategoryTree")
+  communications CommunicationCategory[]
+  createdAt      DateTime                @default(now()) @map("created_at")
+  updatedAt      DateTime                @updatedAt @map("updated_at")
+
+  @@index([parentId, sortOrder])
+  @@map("categories")
+}
+
+model Channel {
+  id             String          @id @default(cuid())
+  key            String          @unique @db.VarChar(40)
+  name           String          @db.VarChar(80)
+  isActive       Boolean         @default(true) @map("is_active")
+  communications Communication[]
+  createdAt      DateTime        @default(now()) @map("created_at")
+  updatedAt      DateTime        @updatedAt @map("updated_at")
+
+  @@map("channels")
+}
+
+model Team {
+  id             String              @id @default(cuid())
+  name           String              @unique @db.VarChar(120)
+  slug           String              @unique @db.VarChar(140)
+  isActive       Boolean             @default(true) @map("is_active")
+  communications CommunicationTeam[]
+  createdAt      DateTime            @default(now()) @map("created_at")
+  updatedAt      DateTime            @updatedAt @map("updated_at")
+
+  @@map("teams")
+}
+
+model Service {
+  id             String                 @id @default(cuid())
+  name           String                 @unique @db.VarChar(120)
+  slug           String                 @unique @db.VarChar(140)
+  isActive       Boolean                @default(true) @map("is_active")
+  communications CommunicationService[]
+  createdAt      DateTime               @default(now()) @map("created_at")
+  updatedAt      DateTime               @updatedAt @map("updated_at")
+
+  @@map("services")
+}
+
+model Tag {
+  id             String             @id @default(cuid())
+  name           String             @unique @db.VarChar(100)
+  slug           String             @unique @db.VarChar(120)
+  communications CommunicationTag[]
+  createdAt      DateTime           @default(now()) @map("created_at")
+
+  @@map("tags")
+}
+
+model Communication {
+  id             String                  @id @default(cuid())
+  code           String                  @db.VarChar(120)
+  name           String                  @db.VarChar(255)
+  description    String?                 @db.Text
+  status         CommunicationStatus     @default(DRAFT)
+  channelId      String                  @map("channel_id")
+  sourceSystem   String?                 @map("source_system") @db.VarChar(60)
+  sourceId       String?                 @map("source_id") @db.VarChar(191)
+  templateFolder String?                 @map("template_folder") @db.VarChar(500)
+  metadata       Json?
+  lastSyncedAt   DateTime?               @map("last_synced_at")
+  publishedAt    DateTime?               @map("published_at")
+  archivedAt     DateTime?               @map("archived_at")
+  createdAt      DateTime                @default(now()) @map("created_at")
+  updatedAt      DateTime                @updatedAt @map("updated_at")
+  channel        Channel                 @relation(fields: [channelId], references: [id], onDelete: Restrict)
+  versions       CommunicationVersion[]
+  categories     CommunicationCategory[]
+  services       CommunicationService[]
+  teams          CommunicationTeam[]
+  tags           CommunicationTag[]
+  favourites     Favourite[]
+
+  @@unique([channelId, code])
+  @@unique([sourceSystem, sourceId])
+  @@index([status, updatedAt])
+  @@index([name])
+  @@map("communications")
+}
+
+model SyncRun {
+  id             String     @id @default(cuid())
+  source         String     @db.VarChar(60)
+  status         SyncStatus @default(RUNNING)
+  communications Int        @default(0)
+  versions       Int        @default(0)
+  details        Int        @default(0)
+  detailErrors   Int        @default(0) @map("detail_errors")
+  error          String?    @db.Text
+  startedAt      DateTime   @default(now()) @map("started_at")
+  completedAt    DateTime?  @map("completed_at")
+
+  @@index([source, startedAt])
+  @@map("sync_runs")
+}
+
+/// Precomputed local-first API projection. Avoids rebuilding the full legacy
+/// GBox payload through many relational joins on every page load.
+model RepositorySnapshot {
+  key       String   @id @db.VarChar(60)
+  payload   Json
+  syncedAt  DateTime @map("synced_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("repository_snapshots")
+}
+
+model CommunicationVersion {
+  id              String                      @id @default(cuid())
+  communicationId String                      @map("communication_id")
+  version         String                      @db.VarChar(60)
+  status          VersionStatus               @default(DRAFT)
+  effectiveAt     DateTime?                   @map("effective_at")
+  publishedAt     DateTime?                   @map("published_at")
+  createdById     String?                     @map("created_by_id")
+  sourceTicketId  String?                     @map("source_ticket_id") @db.VarChar(100)
+  metadata        Json?
+  createdAt       DateTime                    @default(now()) @map("created_at")
+  updatedAt       DateTime                    @updatedAt @map("updated_at")
+  communication   Communication               @relation(fields: [communicationId], references: [id], onDelete: Cascade)
+  createdBy       User?                       @relation("VersionCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  localizations   CommunicationLocalization[]
+  variables       CommunicationVariable[]
+
+  @@unique([communicationId, version])
+  @@index([status, effectiveAt])
+  @@index([createdById])
+  @@map("communication_versions")
+}
+
+model CommunicationLocalization {
+  id              String               @id @default(cuid())
+  versionId       String               @map("version_id")
+  locale          String               @db.VarChar(16)
+  subject         String?              @db.VarChar(500)
+  content         String?              @db.Text
+  filename        String?              @db.VarChar(500)
+  mimeType        String?              @map("mime_type") @db.VarChar(100)
+  previewFilename String?              @map("preview_filename") @db.VarChar(500)
+  previewBase64   String?              @map("preview_base64") @db.Text
+  createdAt       DateTime             @default(now()) @map("created_at")
+  updatedAt       DateTime             @updatedAt @map("updated_at")
+  version         CommunicationVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@unique([versionId, locale])
+  @@map("communication_localizations")
+}
+
+model CommunicationVariable {
+  id          String               @id @default(cuid())
+  versionId   String               @map("version_id")
+  key         String               @db.VarChar(120)
+  description String?              @db.VarChar(500)
+  placeholder String?              @db.VarChar(500)
+  sampleValue String?              @map("sample_value") @db.Text
+  isRequired  Boolean              @default(false) @map("is_required")
+  sortOrder   Int                  @default(0) @map("sort_order")
+  version     CommunicationVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@unique([versionId, key])
+  @@map("communication_variables")
+}
+
+model CommunicationCategory {
+  communicationId String        @map("communication_id")
+  categoryId      String        @map("category_id")
+  communication   Communication @relation(fields: [communicationId], references: [id], onDelete: Cascade)
+  category        Category      @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@id([communicationId, categoryId])
+  @@index([categoryId])
+  @@map("communication_categories")
+}
+
+model CommunicationService {
+  communicationId String        @map("communication_id")
+  serviceId       String        @map("service_id")
+  communication   Communication @relation(fields: [communicationId], references: [id], onDelete: Cascade)
+  service         Service       @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@id([communicationId, serviceId])
+  @@index([serviceId])
+  @@map("communication_services")
+}
+
+model CommunicationTeam {
+  communicationId String        @map("communication_id")
+  teamId          String        @map("team_id")
+  communication   Communication @relation(fields: [communicationId], references: [id], onDelete: Cascade)
+  team            Team          @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@id([communicationId, teamId])
+  @@index([teamId])
+  @@map("communication_teams")
+}
+
+model CommunicationTag {
+  communicationId String        @map("communication_id")
+  tagId           String        @map("tag_id")
+  communication   Communication @relation(fields: [communicationId], references: [id], onDelete: Cascade)
+  tag             Tag           @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([communicationId, tagId])
+  @@index([tagId])
+  @@map("communication_tags")
+}
+
+model Favourite {
+  userId          String        @map("user_id")
+  communicationId String        @map("communication_id")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  communication   Communication @relation(fields: [communicationId], references: [id], onDelete: Cascade)
+
+  @@id([userId, communicationId])
+  @@index([communicationId])
+  @@map("favourites")
+}
+
+model AuditLog {
+  id         String      @id @default(cuid())
+  actorId    String?     @map("actor_id")
+  action     AuditAction
+  entityType String      @map("entity_type") @db.VarChar(80)
+  entityId   String?     @map("entity_id") @db.VarChar(191)
+  changes    Json?
+  ipAddress  String?     @map("ip_address") @db.VarChar(45)
+  userAgent  String?     @map("user_agent") @db.VarChar(500)
+  createdAt  DateTime    @default(now()) @map("created_at")
+  actor      User?       @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId, createdAt])
+  @@index([actorId, createdAt])
+  @@map("audit_logs")
+}
