@@ -13,7 +13,9 @@ async function bootstrap() {
     allowedHeaders: [
       'Accept',
       'Authorization',
+      'Cache-Control',
       'Content-Type',
+      'Pragma',
       'X-Repositorio-App-Version',
     ],
   });
