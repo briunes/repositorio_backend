@@ -2,7 +2,6 @@ import {
   BadGatewayException,
   HttpException,
   Injectable,
-  OnModuleInit,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -15,9 +14,10 @@ import { GboxDetailSyncService } from '../sync/gbox-detail-sync.service';
 type JsonObject = Record<string, unknown>;
 
 @Injectable()
-export class RepoService implements OnModuleInit {
+export class RepoService {
   private readonly baseUrl?: string;
   private templatesCache?: { data: GboxTemplates; expiresAt: number };
+  private filtersCache?: { data: JsonObject; expiresAt: number };
 
   constructor(
     config: ConfigService,
@@ -26,10 +26,6 @@ export class RepoService implements OnModuleInit {
     private readonly detailSync: GboxDetailSyncService,
   ) {
     this.baseUrl = config.get<string>('GBOX_API_BASE_URL')?.replace(/\/$/, '');
-  }
-
-  async onModuleInit() {
-    await this.refreshSnapshotCache();
   }
 
   async login(body: JsonObject) {
@@ -213,41 +209,52 @@ export class RepoService implements OnModuleInit {
   }
 
   async filters() {
-    const [categories, services, teams, channels] = await Promise.all([
-      this.prisma.category.findMany({
-        where: { isActive: true },
-        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
-        select: { id: true, name: true, slug: true, parentId: true },
-      }),
-      this.prisma.service.findMany({
-        where: { isActive: true },
-        orderBy: { name: 'asc' },
-        select: { id: true, name: true, slug: true },
-      }),
-      this.prisma.team.findMany({
-        where: { isActive: true },
-        orderBy: { name: 'asc' },
-        select: { id: true, name: true, slug: true },
-      }),
-      this.prisma.channel.findMany({
-        where: { isActive: true },
-        orderBy: { name: 'asc' },
-        select: { id: true, key: true, name: true },
-      }),
-    ]);
+    if (this.filtersCache && this.filtersCache.expiresAt > Date.now()) {
+      return { status: true, data: this.filtersCache.data };
+    }
+
+    // One round trip is important on serverless deployments, where Prisma is
+    // intentionally limited to one pooled connection per function instance.
+    const [row] = await this.prisma.$queryRaw<Array<{ data: JsonObject }>>`
+      SELECT json_build_object(
+        'categories', COALESCE((
+          SELECT json_agg(json_build_object(
+            'id', id, 'name', name, 'slug', slug, 'parentId', parent_id
+          ) ORDER BY sort_order ASC, name ASC)
+          FROM categories WHERE is_active = true
+        ), '[]'::json),
+        'subcategories', COALESCE((
+          SELECT json_agg(json_build_object(
+            'id', id, 'name', name, 'slug', slug, 'parentId', parent_id
+          ) ORDER BY sort_order ASC, name ASC)
+          FROM categories WHERE is_active = true
+        ), '[]'::json),
+        'services', COALESCE((
+          SELECT json_agg(json_build_object(
+            'id', id, 'name', name, 'slug', slug
+          ) ORDER BY name ASC)
+          FROM services WHERE is_active = true
+        ), '[]'::json),
+        'teams', COALESCE((
+          SELECT json_agg(json_build_object(
+            'id', id, 'name', name, 'slug', slug
+          ) ORDER BY name ASC)
+          FROM teams WHERE is_active = true
+        ), '[]'::json),
+        'channels', COALESCE((
+          SELECT json_agg(json_build_object(
+            'id', id, 'key', key, 'name', name
+          ) ORDER BY name ASC)
+          FROM channels WHERE is_active = true
+        ), '[]'::json)
+      ) AS data
+    `;
+    const data = row?.data ?? {};
+    this.filtersCache = { data, expiresAt: Date.now() + 5 * 60_000 };
 
     return {
       status: true,
-      data: {
-        categories,
-        // GBox currently supplies `subcategoria` as its taxonomy field. These
-        // rows use the hierarchical categories table and can gain parent IDs
-        // later without changing the frontend contract.
-        subcategories: categories,
-        services,
-        teams,
-        channels,
-      },
+      data,
     };
   }
 
@@ -286,6 +293,7 @@ export class RepoService implements OnModuleInit {
       },
     });
     this.cacheTemplates(templates);
+    this.filtersCache = undefined;
     return {
       status: true,
       data: {
