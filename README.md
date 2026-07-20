@@ -35,6 +35,11 @@ for existing environments and CI. Use Supabase's direct connection for
 `DIRECT_URL`; use the session/transaction pooler connection appropriate for the
 deployed backend in `DATABASE_URL`.
 
+For serverless deployments such as Vercel, `DATABASE_URL` must use Supavisor
+transaction mode on port `6543` with `pgbouncer=true&connection_limit=1`. Keep
+`DIRECT_URL` on session/direct mode for Prisma migrations only. This prevents
+separate function instances from exhausting Supabase's session client limit.
+
 Useful commands:
 
 ```bash
