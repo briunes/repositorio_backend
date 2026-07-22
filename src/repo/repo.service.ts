@@ -1,7 +1,10 @@
 import {
+  BadRequestException,
   BadGatewayException,
+  ConflictException,
   HttpException,
   Injectable,
+  NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -37,9 +40,10 @@ export class RepoService {
     return this.withAppRole(response, appRole);
   }
 
-  refresh(body: JsonObject) {
+  refresh(body: JsonObject, authorization?: string) {
     return this.request('/repo/refresh', {
       method: 'POST',
+      headers: authorization ? { Authorization: authorization } : undefined,
       body: JSON.stringify(body),
     });
   }
@@ -68,7 +72,9 @@ export class RepoService {
     const rows = await this.prisma.communication.findMany({
       include: {
         channel: true,
-        categories: { include: { category: true } },
+        subcategories: {
+          include: { subcategory: { include: { category: true } } },
+        },
         services: { include: { service: true } },
         teams: { include: { team: true } },
         tags: { include: { tag: true } },
@@ -91,7 +97,14 @@ export class RepoService {
         nome: row.name,
         desc: row.description ?? undefined,
         templateFolder: row.templateFolder ?? undefined,
-        subcategoria: row.categories.map(({ category }) => category.name),
+        categoria: [
+          ...new Set(
+            row.subcategories.map(
+              ({ subcategory }) => subcategory.category.name,
+            ),
+          ),
+        ],
+        subcategoria: row.subcategories.map(({ subcategory }) => subcategory.name),
         servico: row.services.map(({ service }) => service.name),
         equipa: row.teams.map(({ team }) => team.name),
         tags: row.tags.map(({ tag }) => tag.name),
@@ -219,15 +232,15 @@ export class RepoService {
       SELECT json_build_object(
         'categories', COALESCE((
           SELECT json_agg(json_build_object(
-            'id', id, 'name', name, 'slug', slug, 'parentId', parent_id
+            'id', id, 'name', name, 'slug', slug
           ) ORDER BY sort_order ASC, name ASC)
           FROM categories WHERE is_active = true
         ), '[]'::json),
         'subcategories', COALESCE((
           SELECT json_agg(json_build_object(
-            'id', id, 'name', name, 'slug', slug, 'parentId', parent_id
+            'id', id, 'name', name, 'slug', slug, 'parentId', category_id
           ) ORDER BY sort_order ASC, name ASC)
-          FROM categories WHERE is_active = true
+          FROM subcategories WHERE is_active = true
         ), '[]'::json),
         'services', COALESCE((
           SELECT json_agg(json_build_object(
@@ -258,49 +271,384 @@ export class RepoService {
     };
   }
 
-  async sync(authorization?: string) {
+  async taxonomy() {
+    const data = await this.prisma.category.findMany({
+      where: { isActive: true },
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+      select: {
+        id: true,
+        name: true,
+        sortOrder: true,
+        subcategories: {
+          where: { isActive: true },
+          orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+          select: { id: true, name: true, sortOrder: true },
+        },
+      },
+    });
+    return { status: true, data: data.map(({ subcategories, ...category }) => ({ ...category, children: subcategories })) };
+  }
+
+  async taxonomyHistory() {
+    const data = await this.prisma.auditLog.findMany({
+      where: { entityType: { in: ['category', 'subcategory'] } },
+      take: 100,
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, action: true, entityId: true, changes: true, createdAt: true },
+    });
+    return { status: true, data };
+  }
+
+  async createTaxonomyItem(body: { name?: string; parentId?: string | null }) {
+    const name = body.name?.trim();
+    if (!name) throw new BadRequestException('O nome é obrigatório.');
+    if (body.parentId) {
+      const parent = await this.prisma.category.findFirst({ where: { id: body.parentId, isActive: true }, select: { id: true } });
+      if (!parent) throw new BadRequestException('A categoria selecionada não existe.');
+      const duplicate = await this.prisma.subcategory.findFirst({ where: { name: { equals: name, mode: 'insensitive' }, categoryId: body.parentId, isActive: true }, select: { id: true } });
+      if (duplicate) throw new ConflictException('Já existe uma subcategoria com este nome nesta categoria.');
+      const sortOrder = await this.prisma.subcategory.count({ where: { categoryId: body.parentId, isActive: true } });
+      const item = await this.prisma.subcategory.create({ data: { name, slug: `${this.slug(name)}-${Date.now().toString(36)}`, categoryId: body.parentId, sortOrder }, select: { id: true, name: true, sortOrder: true, categoryId: true } });
+      await this.writeTaxonomyAudit('CREATE', 'subcategory', item.id, { name, parentId: item.categoryId });
+      this.filtersCache = undefined;
+      return { status: true, data: item };
+    }
+    const duplicate = await this.prisma.category.findFirst({ where: { name: { equals: name, mode: 'insensitive' }, isActive: true }, select: { id: true } });
+    if (duplicate) throw new ConflictException('Já existe uma categoria com este nome neste nível.');
+    const sortOrder = await this.prisma.category.count({ where: { isActive: true } });
+    const item = await this.prisma.category.create({ data: { name, slug: `${this.slug(name)}-${Date.now().toString(36)}`, sortOrder }, select: { id: true, name: true, sortOrder: true } });
+    await this.writeTaxonomyAudit('CREATE', 'category', item.id, { name });
+    this.filtersCache = undefined;
+    return { status: true, data: item };
+  }
+
+  async updateTaxonomyItem(id: string, body: { name?: string; kind?: 'category' | 'subcategory' }) {
+    const name = body.name?.trim();
+    if (!name) throw new BadRequestException('O nome é obrigatório.');
+    if (body.kind === 'subcategory') {
+      const current = await this.prisma.subcategory.findFirst({ where: { id, isActive: true }, select: { name: true, categoryId: true } });
+      if (!current) throw new NotFoundException('Subcategoria não encontrada.');
+      const duplicate = await this.prisma.subcategory.findFirst({ where: { id: { not: id }, name: { equals: name, mode: 'insensitive' }, categoryId: current.categoryId, isActive: true }, select: { id: true } });
+      if (duplicate) throw new ConflictException('Já existe uma subcategoria com este nome nesta categoria.');
+      const item = await this.prisma.subcategory.update({ where: { id }, data: { name }, select: { id: true, name: true, sortOrder: true, categoryId: true } });
+      await this.writeTaxonomyAudit('UPDATE', 'subcategory', id, { oldName: current.name, name });
+      this.filtersCache = undefined;
+      return { status: true, data: item };
+    }
+    const current = await this.prisma.category.findFirst({ where: { id, isActive: true }, select: { name: true } });
+    if (!current) throw new NotFoundException('Categoria não encontrada.');
+    const duplicate = await this.prisma.category.findFirst({ where: { id: { not: id }, name: { equals: name, mode: 'insensitive' }, isActive: true }, select: { id: true } });
+    if (duplicate) throw new ConflictException('Já existe uma categoria com este nome.');
+    const item = await this.prisma.category.update({ where: { id }, data: { name }, select: { id: true, name: true, sortOrder: true } });
+    await this.writeTaxonomyAudit('UPDATE', 'category', id, { oldName: current.name, name });
+    this.filtersCache = undefined;
+    return { status: true, data: item };
+  }
+
+  async deleteTaxonomyItem(id: string, kind?: 'category' | 'subcategory') {
+    if (kind === 'subcategory') {
+      const current = await this.prisma.subcategory.findFirst({ where: { id, isActive: true }, select: { name: true, _count: { select: { communications: true } } } });
+      if (!current) throw new NotFoundException('Subcategoria não encontrada.');
+      if (current._count.communications) throw new ConflictException('Esta subcategoria está associada a comunicações e não pode ser eliminada.');
+      await this.prisma.subcategory.update({ where: { id }, data: { isActive: false } });
+      await this.writeTaxonomyAudit('DELETE', 'subcategory', id, { name: current.name });
+      this.filtersCache = undefined;
+      return { status: true, data: { id } };
+    }
+    const current = await this.prisma.category.findFirst({ where: { id, isActive: true }, select: { id: true, name: true, _count: { select: { subcategories: true } } } });
+    if (!current) throw new NotFoundException('Categoria não encontrada.');
+    if (current._count.subcategories) throw new ConflictException('Elimine primeiro as subcategorias desta categoria.');
+    await this.prisma.category.update({ where: { id }, data: { isActive: false } });
+    await this.writeTaxonomyAudit('DELETE', 'category', id, { name: current.name });
+    this.filtersCache = undefined;
+    return { status: true, data: { id } };
+  }
+
+  async reorderTaxonomy(body: { ids?: string[]; parentId?: string | null }) {
+    const ids = [...new Set(body.ids ?? [])];
+    if (!ids.length) throw new BadRequestException('A nova ordem é obrigatória.');
+    const count = body.parentId
+      ? await this.prisma.subcategory.count({ where: { id: { in: ids }, categoryId: body.parentId, isActive: true } })
+      : await this.prisma.category.count({ where: { id: { in: ids }, isActive: true } });
+    if (count !== ids.length) throw new BadRequestException('A ordem contém categorias inválidas.');
+    await this.prisma.$transaction(ids.map((id, sortOrder) => body.parentId
+      ? this.prisma.subcategory.update({ where: { id }, data: { sortOrder } })
+      : this.prisma.category.update({ where: { id }, data: { sortOrder } })));
+    await this.writeTaxonomyAudit('UPDATE', body.parentId ? 'subcategory' : 'category', body.parentId ?? null, { operation: 'reorder', ids, parentId: body.parentId ?? null });
+    this.filtersCache = undefined;
+    return { status: true, data: { ids } };
+  }
+
+  private writeTaxonomyAudit(action: 'CREATE' | 'UPDATE' | 'DELETE', entityType: 'category' | 'subcategory', entityId: string | null, changes: JsonObject) {
+    return this.prisma.auditLog.create({ data: { action, entityType, entityId, changes: this.toJson(changes) } });
+  }
+
+  private slug(value: string) {
+    return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'category';
+  }
+
+  async sync(authorization?: string, userId?: string | number) {
     if (!authorization)
       throw new HttpException(
         { status: false, message: 'Authorization is required.' },
         401,
       );
+    const activeRun = await this.prisma.syncRun.findFirst({
+      where: { source: 'GBOX', status: 'RUNNING' },
+      select: { id: true, startedAt: true },
+    });
+    if (activeRun) {
+      throw new ConflictException({
+        status: false,
+        message: 'Já existe uma sincronização GBox em curso.',
+        data: activeRun,
+      });
+    }
     const payload = await this.request('/repo/', {
       headers: { Authorization: authorization },
     });
+    await this.saveSnapshot('gbox-repo-original', payload);
     const templates = this.unwrapTemplates(payload);
     const run = await this.importer.import(templates);
-    const detailResult = await this.detailSync.sync(
-      templates,
-      async (type, code, locale) => {
-        const search = new URLSearchParams({
-          tipo: type,
-          codigo: code,
-          lang: locale,
-          previewPdf: '1',
-        });
-        const detailPayload = await this.request(
-          `/repo/details?${search.toString()}`,
-          { headers: { Authorization: authorization } },
+    try {
+      let detailAuthorization = await this.refreshSyncAuthorization(
+        userId,
+        authorization,
+      );
+      let refreshedAuthorization: Promise<string> | undefined;
+      const detailResult = await this.detailSync.sync(
+        templates,
+        async (type, code, locale) => {
+          const search = new URLSearchParams({
+            tipo: type,
+            codigo: code,
+            lang: locale,
+            previewPdf: '1',
+          });
+          const path = `/repo/details?${search.toString()}`;
+          let detailPayload: unknown;
+          try {
+            detailPayload = await this.request(path, {
+              headers: { Authorization: detailAuthorization },
+            });
+          } catch (error) {
+            if (!this.isAuthenticationError(error)) throw error;
+            refreshedAuthorization ??= this.refreshSyncAuthorization(
+              userId,
+              detailAuthorization,
+            );
+            detailAuthorization = await refreshedAuthorization;
+            detailPayload = await this.request(path, {
+              headers: { Authorization: detailAuthorization },
+            });
+          }
+          return {
+            detail: this.unwrapDetail(detailPayload),
+            originalPayload: detailPayload,
+          };
+        },
+        async (details, detailErrors) => {
+          await this.prisma.syncRun.update({
+            where: { id: run.id },
+            data: { details, detailErrors },
+          });
+        },
+      );
+      const allDetailsFailed =
+        detailResult.details === 0 && detailResult.detailErrors > 0;
+      const detailError = detailResult.detailErrors
+        ? detailResult.detailErrorSamples
+            .map(({ type, code, locale, message }) =>
+              `${type}:${code}:${locale} — ${message}`,
+            )
+            .join('\n')
+        : null;
+      const completedRun = await this.prisma.syncRun.update({
+        where: { id: run.id },
+        data: {
+          status: allDetailsFailed ? 'FAILED' : 'SUCCEEDED',
+          details: detailResult.details,
+          detailErrors: detailResult.detailErrors,
+          error: detailError,
+          completedAt: new Date(),
+        },
+      });
+      const unauthorized =
+        allDetailsFailed &&
+        detailResult.detailErrorSamples.length > 0 &&
+        detailResult.detailErrorSamples.every(({ message }) =>
+          this.isAuthenticationMessage(message),
         );
-        return this.unwrapDetail(detailPayload);
-      },
-    );
-    const completedRun = await this.prisma.syncRun.update({
-      where: { id: run.id },
-      data: {
-        details: detailResult.details,
-        detailErrors: detailResult.detailErrors,
-      },
+      if (unauthorized)
+        throw new HttpException(
+          { status: false, message: 'Unauthorized' },
+          401,
+        );
+      this.cacheTemplates(templates);
+      this.filtersCache = undefined;
+      return {
+        status: true,
+        data: {
+          ...completedRun,
+          detailErrorSamples: detailResult.detailErrorSamples,
+        },
+      };
+    } catch (error) {
+      await this.prisma.syncRun.update({
+        where: { id: run.id },
+        data: {
+          status: 'FAILED',
+          error: error instanceof Error ? error.message : 'Detail sync failed.',
+          completedAt: new Date(),
+        },
+      });
+      throw error;
+    }
+  }
+
+  async syncDetails(authorization?: string) {
+    if (!authorization)
+      throw new HttpException(
+        { status: false, message: 'Authorization is required.' },
+        401,
+      );
+    const activeRun = await this.prisma.syncRun.findFirst({
+      where: { status: 'RUNNING', source: { in: ['GBOX', 'GBOX_DETAILS'] } },
+      select: { id: true, startedAt: true },
     });
-    this.cacheTemplates(templates);
-    this.filtersCache = undefined;
-    return {
-      status: true,
-      data: {
-        ...completedRun,
-        detailErrorSamples: detailResult.detailErrorSamples,
-      },
-    };
+    if (activeRun)
+      throw new ConflictException({
+        status: false,
+        message: 'Já existe uma sincronização GBox em curso.',
+        data: activeRun,
+      });
+    const snapshot = await this.prisma.repositorySnapshot.findUnique({
+      where: { key: 'gbox-templates' },
+      select: { payload: true },
+    });
+    if (!snapshot || !this.isObject(snapshot.payload))
+      throw new BadRequestException(
+        'Sincronize primeiro o repositório antes de sincronizar os detalhes.',
+      );
+    const templates = snapshot.payload as GboxTemplates;
+    const [communications, versions] = await Promise.all([
+      this.prisma.communication.count({ where: { sourceSystem: 'GBOX' } }),
+      this.prisma.communicationVersion.count({
+        where: { communication: { sourceSystem: 'GBOX' } },
+      }),
+    ]);
+    const run = await this.prisma.syncRun.create({
+      data: { source: 'GBOX_DETAILS', communications, versions },
+    });
+    try {
+      const result = await this.detailSync.sync(
+        templates,
+        async (type, code, locale) => {
+          const search = new URLSearchParams({
+            tipo: type,
+            codigo: code,
+            lang: locale,
+            previewPdf: '1',
+          });
+          const payload = await this.request(
+            `/repo/details?${search.toString()}`,
+            { headers: { Authorization: authorization } },
+          );
+          return {
+            detail: this.unwrapDetail(payload),
+            originalPayload: payload,
+          };
+        },
+        async (details, detailErrors) => {
+          await this.prisma.syncRun.update({
+            where: { id: run.id },
+            data: { details, detailErrors },
+          });
+        },
+      );
+      const samples = result.detailErrorSamples;
+      const allFailed = result.details === 0 && result.detailErrors > 0;
+      const unauthorized =
+        allFailed &&
+        samples.length > 0 &&
+        samples.every(({ message }) =>
+          this.isAuthenticationMessage(message),
+        );
+      const error = samples.length
+        ? samples
+            .map(({ type, code, locale, message }) =>
+              `${type}:${code}:${locale} — ${message}`,
+            )
+            .join('\n')
+        : null;
+      const completed = await this.prisma.syncRun.update({
+        where: { id: run.id },
+        data: {
+          status: allFailed ? 'FAILED' : 'SUCCEEDED',
+          details: result.details,
+          detailErrors: result.detailErrors,
+          error,
+          completedAt: new Date(),
+        },
+      });
+      if (unauthorized)
+        throw new HttpException(
+          { status: false, message: 'Unauthorized' },
+          401,
+        );
+      return {
+        status: true,
+        data: { ...completed, detailErrorSamples: samples },
+      };
+    } catch (error) {
+      await this.prisma.syncRun.updateMany({
+        where: { id: run.id, status: 'RUNNING' },
+        data: {
+          status: 'FAILED',
+          error: error instanceof Error ? error.message : 'Detail sync failed.',
+          completedAt: new Date(),
+        },
+      });
+      throw error;
+    }
+  }
+
+  private async refreshSyncAuthorization(
+    userId: string | number | undefined,
+    fallbackAuthorization: string,
+  ) {
+    const normalizedUserId = Number(userId);
+    if (!Number.isFinite(normalizedUserId)) {
+      throw new BadRequestException(
+        'Não foi possível renovar a sessão GBox antes de sincronizar os detalhes.',
+      );
+    }
+    const payload = await this.request('/repo/refresh', {
+      method: 'POST',
+      headers: { Authorization: fallbackAuthorization },
+      body: JSON.stringify({ iUserId: normalizedUserId }),
+    });
+    const token = this.isObject(payload) && this.isObject(payload.data)
+      ? this.firstString(payload.data.token)
+      : undefined;
+    return token ? `Bearer ${token}` : fallbackAuthorization;
+  }
+
+  private isAuthenticationError(error: unknown) {
+    return (
+      error instanceof HttpException &&
+      (error.getStatus() === 401 || error.getStatus() === 403)
+    );
+  }
+
+  private isAuthenticationMessage(message: string) {
+    const normalized = message.toLocaleLowerCase();
+    return (
+      normalized.includes('unauthorized') ||
+      normalized.includes('invalid token') ||
+      normalized.includes('token invalid') ||
+      normalized.includes('token expir')
+    );
   }
 
   private async request(path: string, init: RequestInit = {}) {
@@ -329,7 +677,9 @@ export class RepoService {
     return payload;
   }
 
-  private async syncLoggedInUser(payload: unknown): Promise<string | undefined> {
+  private async syncLoggedInUser(
+    payload: unknown,
+  ): Promise<string | undefined> {
     if (
       !this.isObject(payload) ||
       !this.isObject(payload.data) ||
@@ -439,6 +789,15 @@ export class RepoService {
 
   private cacheTemplates(data: GboxTemplates) {
     this.templatesCache = { data, expiresAt: Date.now() + 30_000 };
+  }
+
+  private async saveSnapshot(key: string, payload: unknown) {
+    const syncedAt = new Date();
+    await this.prisma.repositorySnapshot.upsert({
+      where: { key },
+      update: { payload: this.toJson(payload), syncedAt },
+      create: { key, payload: this.toJson(payload), syncedAt },
+    });
   }
 
   private async refreshSnapshotCache() {

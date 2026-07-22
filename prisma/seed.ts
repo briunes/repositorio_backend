@@ -103,21 +103,24 @@ async function main() {
     });
   }
 
-  for (const [key, name] of channels) {
+  for (const [categoryOrder, [key, name]] of channels.entries()) {
     await prisma.channel.upsert({
       where: { key },
       update: { name, isActive: true },
       create: { key, name },
     });
-  }
-
-  for (const [sortOrder, name] of categories.entries()) {
-    const categorySlug = slug(name);
-    await prisma.category.upsert({
-      where: { slug: categorySlug },
-      update: { name, sortOrder, isActive: true },
-      create: { name, slug: categorySlug, sortOrder },
+    const category = await prisma.category.upsert({
+      where: { slug: slug(key) },
+      update: { name, sortOrder: categoryOrder, isActive: true },
+      create: { name, slug: slug(key), sortOrder: categoryOrder },
     });
+    for (const [sortOrder, subcategoryName] of categories.entries()) {
+      await prisma.subcategory.upsert({
+        where: { categoryId_slug: { categoryId: category.id, slug: slug(subcategoryName) } },
+        update: { name: subcategoryName, sortOrder, isActive: true },
+        create: { categoryId: category.id, name: subcategoryName, slug: slug(subcategoryName), sortOrder },
+      });
+    }
   }
 }
 

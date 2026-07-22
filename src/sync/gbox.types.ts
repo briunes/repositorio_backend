@@ -14,6 +14,7 @@ export type GboxVersion = {
 export type GboxTemplate = {
   nome?: string;
   desc?: string;
+  categoria?: string[];
   subcategoria?: string[];
   equipa?: string[];
   servico?: string[];

@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { GboxTemplateDetail, GboxTemplates } from './gbox.types';
 import { PrismaService } from '../database/prisma.service';
 
@@ -6,7 +7,7 @@ type DetailFetcher = (
   type: string,
   code: string,
   locale: string,
-) => Promise<GboxTemplateDetail>;
+) => Promise<{ detail: GboxTemplateDetail; originalPayload: unknown }>;
 
 type DetailTarget = { type: string; code: string; locale: string };
 
@@ -14,41 +15,59 @@ type DetailTarget = { type: string; code: string; locale: string };
 export class GboxDetailSyncService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async sync(templates: GboxTemplates, fetchDetail: DetailFetcher) {
+  async sync(
+    templates: GboxTemplates,
+    fetchDetail: DetailFetcher,
+    onProgress?: (details: number, detailErrors: number) => Promise<void>,
+  ) {
     const targets = this.targets(templates);
     let details = 0;
     let detailErrors = 0;
     const detailErrorSamples: Array<DetailTarget & { message: string }> = [];
 
-    for (let index = 0; index < targets.length; index += 3) {
-      const batchTargets = targets.slice(index, index + 3);
+    // Fetch remote details in wider batches, then use the bounded four-
+    // connection Prisma pool for database persistence.
+    for (let index = 0; index < targets.length; index += 8) {
+      const batchTargets = targets.slice(index, index + 8);
       const results = await Promise.allSettled(
-        batchTargets.map(async (target) => {
-          const detail = await fetchDetail(
-            target.type,
-            target.code,
-            target.locale,
-          );
-          await this.save(target, detail);
-        }),
+        batchTargets.map((target) =>
+          fetchDetail(target.type, target.code, target.locale),
+        ),
       );
-      details += results.filter(
-        (result) => result.status === 'fulfilled',
-      ).length;
-      detailErrors += results.filter(
-        (result) => result.status === 'rejected',
-      ).length;
-      results.forEach((result, resultIndex) => {
-        if (result.status === 'fulfilled' || detailErrorSamples.length >= 10)
-          return;
-        detailErrorSamples.push({
-          ...batchTargets[resultIndex],
-          message:
-            result.reason instanceof Error
-              ? result.reason.message
-              : String(result.reason),
-        });
-      });
+      for (let saveIndex = 0; saveIndex < results.length; saveIndex += 4) {
+        const saveResults = await Promise.allSettled(
+          results.slice(saveIndex, saveIndex + 4).map((result, offset) => {
+            if (result.status === 'rejected')
+              return Promise.reject(result.reason);
+            const target = batchTargets[saveIndex + offset];
+            return this.save(
+              target,
+              result.value.detail,
+              result.value.originalPayload,
+            );
+          }),
+        );
+        for (const [offset, saveResult] of saveResults.entries()) {
+          const target = batchTargets[saveIndex + offset];
+          if (saveResult.status === 'fulfilled') {
+            details += 1;
+          } else {
+            detailErrors += 1;
+            if (detailErrorSamples.length < 10) {
+              detailErrorSamples.push({
+                ...target,
+                message:
+                  saveResult.reason instanceof Error
+                    ? saveResult.reason.message
+                    : String(saveResult.reason),
+              });
+            }
+          }
+        }
+      }
+      if (onProgress) {
+        await onProgress(details, detailErrors);
+      }
     }
 
     return { details, detailErrors, detailErrorSamples };
@@ -78,7 +97,11 @@ export class GboxDetailSyncService {
     return targets;
   }
 
-  private async save(target: DetailTarget, detail: GboxTemplateDetail) {
+  private async save(
+    target: DetailTarget,
+    detail: GboxTemplateDetail,
+    originalPayload: unknown,
+  ) {
     const channel = target.type === 'PUSH' ? 'BLIP' : target.type;
     const communication = await this.prisma.communication.findFirst({
       where: { code: target.code, channel: { key: channel } },
@@ -115,6 +138,7 @@ export class GboxDetailSyncService {
           mimeType: pdf?.mime,
           previewFilename: pdf?.filename,
           previewBase64: pdf?.base64,
+          sourcePayload: this.json(originalPayload),
         },
         create: {
           versionId: version.id,
@@ -124,6 +148,7 @@ export class GboxDetailSyncService {
           mimeType: pdf?.mime,
           previewFilename: pdf?.filename,
           previewBase64: pdf?.base64,
+          sourcePayload: this.json(originalPayload),
         },
       }),
       ...Array.from(variablesByKey.values()).map((variable) =>
@@ -164,5 +189,9 @@ export class GboxDetailSyncService {
       return String(value);
     }
     return JSON.stringify(value);
+  }
+
+  private json(value: unknown) {
+    return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
   }
 }

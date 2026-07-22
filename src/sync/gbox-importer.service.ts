@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma, VersionStatus } from '@prisma/client';
+import { CommunicationStatus, Prisma, VersionStatus } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import {
   GboxLocalizedVersion,
@@ -9,6 +9,7 @@ import {
 } from './gbox.types';
 
 type ImportEntry = { channel: string; code: string; template: GboxTemplate };
+type PreparedCommunication = { id: string; contentIsUnchanged: boolean };
 
 @Injectable()
 export class GboxImporterService {
@@ -27,15 +28,47 @@ export class GboxImporterService {
         );
       }
       const lookups = await this.prepareLookups(entries);
+      const communications = await this.upsertCommunications(entries, lookups);
+      await this.prisma.syncRun.update({
+        where: { id: run.id },
+        data: { communications: entries.length },
+      });
       let versionCount = 0;
 
-      for (let index = 0; index < entries.length; index += 8) {
+      // Match the bounded Prisma pool: four independent communication graphs
+      // can be written concurrently without queuing beyond the pool timeout.
+      for (let index = 0; index < entries.length; index += 4) {
         const counts = await Promise.all(
           entries
-            .slice(index, index + 8)
-            .map((entry) => this.importCommunication(entry, lookups)),
+            .slice(index, index + 4)
+            .map((entry) =>
+              this.importCommunication(
+                entry,
+                lookups,
+                communications.get(`${entry.channel}:${entry.code}`)!,
+              ),
+            ),
         );
         versionCount += counts.reduce((total, count) => total + count, 0);
+        await this.prisma.syncRun.update({
+          where: { id: run.id },
+          data: {
+            communications: Math.min(index + 4, entries.length),
+            versions: versionCount,
+          },
+        });
+      }
+
+      const returnedCategorySlugs = new Set(
+        [...lookups.categories.keys()].map((name) => this.slug(name)),
+      );
+      const obsoleteChannelCategorySlugs = [...lookups.channels.keys()]
+        .map((channel) => this.slug(channel))
+        .filter((slug) => !returnedCategorySlugs.has(slug));
+      if (obsoleteChannelCategorySlugs.length) {
+        await this.prisma.category.deleteMany({
+          where: { slug: { in: obsoleteChannelCategorySlugs } },
+        });
       }
 
       const sourceIds = entries.map(
@@ -62,10 +95,8 @@ export class GboxImporterService {
       return await this.prisma.syncRun.update({
         where: { id: run.id },
         data: {
-          status: 'SUCCEEDED',
           communications: entries.length,
           versions: versionCount,
-          completedAt: new Date(),
         },
       });
     } catch (error) {
@@ -81,6 +112,108 @@ export class GboxImporterService {
     }
   }
 
+  private async upsertCommunications(
+    entries: ImportEntry[],
+    lookups: Awaited<ReturnType<GboxImporterService['prepareLookups']>>,
+  ) {
+    const sourceIds = entries.map(({ channel, code }) => `${channel}:${code}`);
+    const existingRows = await this.prisma.communication.findMany({
+      where: { sourceSystem: 'GBOX', sourceId: { in: sourceIds } },
+      select: {
+        id: true,
+        sourceId: true,
+        metadata: true,
+        subcategories: { select: { subcategoryId: true } },
+      },
+    });
+    const existing = new Map(
+      existingRows.map((row) => [row.sourceId!, row]),
+    );
+    const now = new Date();
+    const missing = entries.filter(
+      ({ channel, code }) => !existing.has(`${channel}:${code}`),
+    );
+    for (let index = 0; index < missing.length; index += 50) {
+      await this.prisma.communication.createMany({
+        data: missing
+          .slice(index, index + 50)
+          .map((entry) => this.communicationData(entry, lookups, now)),
+        skipDuplicates: true,
+      });
+    }
+    const present = entries.filter(({ channel, code }) =>
+      existing.has(`${channel}:${code}`),
+    );
+    for (let index = 0; index < present.length; index += 50) {
+      await this.prisma.$transaction(
+        present.slice(index, index + 50).map((entry) => {
+          const sourceId = `${entry.channel}:${entry.code}`;
+          return this.prisma.communication.update({
+            where: { id: existing.get(sourceId)!.id },
+            data: this.communicationData(entry, lookups, now),
+          });
+        }),
+      );
+    }
+    const rows = await this.prisma.communication.findMany({
+      where: { sourceSystem: 'GBOX', sourceId: { in: sourceIds } },
+      select: { id: true, sourceId: true },
+    });
+    return new Map<string, PreparedCommunication>(
+      rows.map((row) => {
+        const old = existing.get(row.sourceId!);
+        const entry = entries.find(
+          ({ channel, code }) => `${channel}:${code}` === row.sourceId,
+        )!;
+        return [
+          row.sourceId!,
+          {
+            id: row.id,
+            contentIsUnchanged:
+              Boolean(old) &&
+              this.stableJson(old!.metadata) ===
+                this.stableJson(entry.template) &&
+              this.sameIds(
+                old!.subcategories.map(({ subcategoryId }) => subcategoryId),
+                this.taxonomyPairs(entry.template).map(
+                  ({ category, subcategory }) =>
+                    lookups.subcategories.get(`${category}:${subcategory}`)!,
+                ),
+              ),
+          },
+        ];
+      }),
+    );
+  }
+
+  private communicationData(
+    { channel, code, template }: ImportEntry,
+    lookups: Awaited<ReturnType<GboxImporterService['prepareLookups']>>,
+    now: Date,
+  ): Prisma.CommunicationCreateManyInput {
+    const versions = Object.values(template.versoes ?? {});
+    const latestDate = versions
+      .map((value) => this.date(value.dataVersao))
+      .filter((value): value is Date => Boolean(value))
+      .sort((left, right) => right.getTime() - left.getTime())[0];
+    return {
+      channelId: lookups.channels.get(channel)!,
+      code,
+      name: template.nome?.trim() || code,
+      description: template.desc?.trim(),
+      status: (latestDate && latestDate > now
+        ? 'SCHEDULED'
+        : versions.length
+          ? 'AVAILABLE'
+          : 'UNAVAILABLE') as CommunicationStatus,
+      sourceSystem: 'GBOX',
+      sourceId: `${channel}:${code}`,
+      templateFolder: template.templateFolder,
+      metadata: this.json(template),
+      lastSyncedAt: now,
+    };
+  }
+
   private entries(templates: GboxTemplates) {
     const entries: ImportEntry[] = [];
     for (const [channel, byCode] of Object.entries(templates)) {
@@ -94,16 +227,20 @@ export class GboxImporterService {
 
   private async prepareLookups(entries: ImportEntry[]) {
     const channels = new Set(entries.map(({ channel }) => channel));
-    const categories = new Set<string>();
+    const categoryNames = new Set<string>();
+    const subcategoryNamesByCategory = new Map<string, Set<string>>();
     const services = new Set<string>();
     const teams = new Set<string>();
     const tags = new Set<string>();
 
     for (const { template } of entries) {
-      (template.subcategoria?.length
-        ? template.subcategoria
-        : ['Sem subcategoria']
-      ).forEach((value) => categories.add(value.trim()));
+      for (const { category, subcategory } of this.taxonomyPairs(template)) {
+        categoryNames.add(category);
+        const subcategories =
+          subcategoryNamesByCategory.get(category) ?? new Set<string>();
+        subcategories.add(subcategory);
+        subcategoryNamesByCategory.set(category, subcategories);
+      }
       (template.servico?.length ? template.servico : ['Sem serviço']).forEach(
         (value) => services.add(value.trim()),
       );
@@ -114,6 +251,7 @@ export class GboxImporterService {
     }
 
     const channelMap = new Map<string, string>();
+    const subcategoryMap = new Map<string, string>();
     for (const key of channels) {
       const row = await this.prisma.channel.upsert({
         where: { key },
@@ -122,10 +260,38 @@ export class GboxImporterService {
       });
       channelMap.set(key, row.id);
     }
+    const categoryMap = new Map<string, string>();
+    for (const name of categoryNames) {
+      const category = await this.prisma.category.upsert({
+        where: { slug: this.slug(name) },
+        update: { name, isActive: true },
+        create: { name, slug: this.slug(name) },
+      });
+      categoryMap.set(name, category.id);
+      for (const subcategoryName of
+        subcategoryNamesByCategory.get(name) ?? []) {
+        const subcategory = await this.prisma.subcategory.upsert({
+          where: {
+            categoryId_slug: {
+              categoryId: category.id,
+              slug: this.slug(subcategoryName),
+            },
+          },
+          update: { name: subcategoryName, isActive: true },
+          create: {
+            categoryId: category.id,
+            name: subcategoryName,
+            slug: this.slug(subcategoryName),
+          },
+        });
+        subcategoryMap.set(`${name}:${subcategoryName}`, subcategory.id);
+      }
+    }
 
     return {
       channels: channelMap,
-      categories: await this.upsertNamed('category', categories),
+      categories: categoryMap,
+      subcategories: subcategoryMap,
       services: await this.upsertNamed('service', services),
       teams: await this.upsertNamed('team', teams),
       tags: await this.upsertNamed('tag', tags),
@@ -133,98 +299,46 @@ export class GboxImporterService {
   }
 
   private async upsertNamed(
-    model: 'category' | 'service' | 'team' | 'tag',
+    model: 'service' | 'team' | 'tag',
     names: Set<string>,
   ) {
-    const result = new Map<string, string>();
-    for (const name of names) {
-      if (!name) continue;
-      const slug = this.slug(name);
-      const row =
-        model === 'category'
-          ? await this.prisma.category.upsert({
-              where: { slug },
-              update: { name },
-              create: { name, slug },
-            })
-          : model === 'service'
-            ? await this.prisma.service.upsert({
-                where: { slug },
-                update: { name },
-                create: { name, slug },
-              })
-            : model === 'team'
-              ? await this.prisma.team.upsert({
-                  where: { slug },
-                  update: { name },
-                  create: { name, slug },
-                })
-              : await this.prisma.tag.upsert({
-                  where: { slug },
-                  update: { name },
-                  create: { name, slug },
-                });
-      result.set(name, row.id);
+    const values = [...names]
+      .filter(Boolean)
+      .map((name) => ({ name, slug: this.slug(name) }));
+    if (model === 'service') {
+      await this.prisma.service.createMany({ data: values, skipDuplicates: true });
+      const rows = await this.prisma.service.findMany({ where: { slug: { in: values.map(({ slug }) => slug) } } });
+      return new Map(values.map(({ name, slug }) => [name, rows.find((row) => row.slug === slug)!.id]));
     }
-    return result;
+    if (model === 'team') {
+      await this.prisma.team.createMany({ data: values, skipDuplicates: true });
+      const rows = await this.prisma.team.findMany({ where: { slug: { in: values.map(({ slug }) => slug) } } });
+      return new Map(values.map(({ name, slug }) => [name, rows.find((row) => row.slug === slug)!.id]));
+    }
+    await this.prisma.tag.createMany({ data: values, skipDuplicates: true });
+    const rows = await this.prisma.tag.findMany({ where: { slug: { in: values.map(({ slug }) => slug) } } });
+    return new Map(values.map(({ name, slug }) => [name, rows.find((row) => row.slug === slug)!.id]));
   }
 
   private async importCommunication(
-    { channel, code, template }: ImportEntry,
+    { template }: ImportEntry,
     lookups: Awaited<ReturnType<GboxImporterService['prepareLookups']>>,
+    communication: PreparedCommunication,
   ) {
     const versions = Object.entries(template.versoes ?? {});
-    const latestDate = versions
-      .map(([, value]) => this.date(value.dataVersao))
-      .filter((value): value is Date => Boolean(value))
-      .sort((a, b) => b.getTime() - a.getTime())[0];
-    const now = new Date();
-    const communication = await this.prisma.communication.upsert({
-      where: {
-        channelId_code: { channelId: lookups.channels.get(channel)!, code },
-      },
-      update: {
-        name: template.nome?.trim() || code,
-        description: template.desc?.trim(),
-        status:
-          latestDate && latestDate > now
-            ? 'SCHEDULED'
-            : versions.length
-              ? 'AVAILABLE'
-              : 'UNAVAILABLE',
-        sourceSystem: 'GBOX',
-        sourceId: `${channel}:${code}`,
-        templateFolder: template.templateFolder,
-        metadata: this.json(template),
-        lastSyncedAt: now,
-      },
-      create: {
-        channelId: lookups.channels.get(channel)!,
-        code,
-        name: template.nome?.trim() || code,
-        description: template.desc?.trim(),
-        status:
-          latestDate && latestDate > now
-            ? 'SCHEDULED'
-            : versions.length
-              ? 'AVAILABLE'
-              : 'UNAVAILABLE',
-        sourceSystem: 'GBOX',
-        sourceId: `${channel}:${code}`,
-        templateFolder: template.templateFolder,
-        metadata: this.json(template),
-        lastSyncedAt: now,
-      },
-    });
 
-    const categoryNames = template.subcategoria?.length
-      ? template.subcategoria
-      : ['Sem subcategoria'];
+    // GBox syncs are usually mostly unchanged. Avoid deleting and recreating
+    // the complete version/localization/variable graph when its source payload
+    // is identical; the lightweight communication update above still records
+    // the new lastSyncedAt and availability.
+    if (communication.contentIsUnchanged) return versions.length;
+
+    const taxonomyPairs = this.taxonomyPairs(template);
     await this.prisma.$transaction([
       this.prisma.communicationVersion.deleteMany({
         where: { communicationId: communication.id },
       }),
-      this.prisma.communicationCategory.deleteMany({
+      this.prisma.communicationSubcategory.deleteMany({
         where: { communicationId: communication.id },
       }),
       this.prisma.communicationService.deleteMany({
@@ -236,10 +350,10 @@ export class GboxImporterService {
       this.prisma.communicationTag.deleteMany({
         where: { communicationId: communication.id },
       }),
-      this.prisma.communicationCategory.createMany({
-        data: categoryNames.map((name) => ({
+      this.prisma.communicationSubcategory.createMany({
+        data: taxonomyPairs.map(({ category, subcategory }) => ({
           communicationId: communication.id,
-          categoryId: lookups.categories.get(name.trim())!,
+          subcategoryId: lookups.subcategories.get(`${category}:${subcategory}`)!,
         })),
       }),
       this.prisma.communicationService.createMany({
@@ -340,6 +454,32 @@ export class GboxImporterService {
     return [...new Set(values.map((item) => item.trim()).filter(Boolean))];
   }
 
+  private taxonomyPairs(template: GboxTemplate) {
+    const categories = (template.categoria?.length
+      ? template.categoria
+      : ['Sem categoria']
+    ).map((value) => value.trim());
+    const subcategories = (template.subcategoria?.length
+      ? template.subcategoria
+      : ['Sem subcategoria']
+    ).map((value) => value.trim());
+    const pairs = categories.flatMap((category) =>
+      subcategories.map((subcategory) => ({ category, subcategory })),
+    );
+    return [...new Map(
+      pairs.map((pair) => [`${pair.category}:${pair.subcategory}`, pair]),
+    ).values()];
+  }
+
+  private sameIds(left: string[], right: string[]) {
+    const normalizedLeft = [...new Set(left)].sort();
+    const normalizedRight = [...new Set(right)].sort();
+    return (
+      normalizedLeft.length === normalizedRight.length &&
+      normalizedLeft.every((value, index) => value === normalizedRight[index])
+    );
+  }
+
   private date(value?: string) {
     if (!value) return null;
     const date = new Date(
@@ -359,5 +499,18 @@ export class GboxImporterService {
 
   private json(value: unknown) {
     return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+  }
+
+  private stableJson(value: unknown): string {
+    if (Array.isArray(value)) {
+      return `[${value.map((item) => this.stableJson(item)).join(',')}]`;
+    }
+    if (value && typeof value === 'object') {
+      return `{${Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => `${JSON.stringify(key)}:${this.stableJson(item)}`)
+        .join(',')}}`;
+    }
+    return JSON.stringify(value) ?? 'null';
   }
 }

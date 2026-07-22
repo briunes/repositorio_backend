@@ -116,21 +116,36 @@ model RolePermission {
 }
 
 model Category {
-  id             String                  @id @default(cuid())
-  name           String                  @db.VarChar(120)
-  slug           String                  @unique @db.VarChar(140)
-  description    String?                 @db.VarChar(500)
-  sortOrder      Int                     @default(0) @map("sort_order")
-  isActive       Boolean                 @default(true) @map("is_active")
-  parentId       String?                 @map("parent_id")
-  parent         Category?               @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
-  children       Category[]              @relation("CategoryTree")
-  communications CommunicationCategory[]
-  createdAt      DateTime                @default(now()) @map("created_at")
-  updatedAt      DateTime                @updatedAt @map("updated_at")
+  id            String        @id @default(cuid())
+  name          String        @db.VarChar(120)
+  slug          String        @unique @db.VarChar(140)
+  description   String?       @db.VarChar(500)
+  sortOrder     Int           @default(0) @map("sort_order")
+  isActive      Boolean       @default(true) @map("is_active")
+  subcategories Subcategory[]
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
 
-  @@index([parentId, sortOrder])
+  @@index([sortOrder])
   @@map("categories")
+}
+
+model Subcategory {
+  id             String                     @id @default(cuid())
+  categoryId     String                     @map("category_id")
+  name           String                     @db.VarChar(120)
+  slug           String                     @db.VarChar(140)
+  description    String?                    @db.VarChar(500)
+  sortOrder      Int                        @default(0) @map("sort_order")
+  isActive       Boolean                    @default(true) @map("is_active")
+  category       Category                   @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  communications CommunicationSubcategory[]
+  createdAt      DateTime                   @default(now()) @map("created_at")
+  updatedAt      DateTime                   @updatedAt @map("updated_at")
+
+  @@unique([categoryId, slug])
+  @@index([categoryId, sortOrder])
+  @@map("subcategories")
 }
 
 model Channel {
@@ -197,7 +212,7 @@ model Communication {
   updatedAt      DateTime                @updatedAt @map("updated_at")
   channel        Channel                 @relation(fields: [channelId], references: [id], onDelete: Restrict)
   versions       CommunicationVersion[]
-  categories     CommunicationCategory[]
+  subcategories  CommunicationSubcategory[]
   services       CommunicationService[]
   teams          CommunicationTeam[]
   tags           CommunicationTag[]
@@ -270,6 +285,7 @@ model CommunicationLocalization {
   mimeType        String?              @map("mime_type") @db.VarChar(100)
   previewFilename String?              @map("preview_filename") @db.VarChar(500)
   previewBase64   String?              @map("preview_base64") @db.Text
+  sourcePayload   Json?                @map("source_payload")
   createdAt       DateTime             @default(now()) @map("created_at")
   updatedAt       DateTime             @updatedAt @map("updated_at")
   version         CommunicationVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
@@ -293,15 +309,15 @@ model CommunicationVariable {
   @@map("communication_variables")
 }
 
-model CommunicationCategory {
+model CommunicationSubcategory {
   communicationId String        @map("communication_id")
-  categoryId      String        @map("category_id")
+  subcategoryId   String        @map("subcategory_id")
   communication   Communication @relation(fields: [communicationId], references: [id], onDelete: Cascade)
-  category        Category      @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  subcategory     Subcategory   @relation(fields: [subcategoryId], references: [id], onDelete: Cascade)
 
-  @@id([communicationId, categoryId])
-  @@index([categoryId])
-  @@map("communication_categories")
+  @@id([communicationId, subcategoryId])
+  @@index([subcategoryId])
+  @@map("communication_subcategories")
 }
 
 model CommunicationService {

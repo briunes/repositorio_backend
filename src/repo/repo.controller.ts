@@ -1,9 +1,11 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Headers,
   Param,
+  Patch,
   Post,
   Query,
 } from '@nestjs/common';
@@ -19,8 +21,11 @@ export class RepoController {
   }
 
   @Post('refresh')
-  refresh(@Body() body: Record<string, unknown>) {
-    return this.repo.refresh(body);
+  refresh(
+    @Body() body: Record<string, unknown>,
+    @Headers('authorization') authorization?: string,
+  ) {
+    return this.repo.refresh(body, authorization);
   }
 
   @Get()
@@ -29,13 +34,51 @@ export class RepoController {
   }
 
   @Post('sync')
-  sync(@Headers('authorization') authorization?: string) {
-    return this.repo.sync(authorization);
+  sync(
+    @Headers('authorization') authorization?: string,
+    @Body() body?: { userId?: string | number },
+  ) {
+    return this.repo.sync(authorization, body?.userId);
+  }
+
+  @Post('sync/details')
+  syncDetails(@Headers('authorization') authorization?: string) {
+    return this.repo.syncDetails(authorization);
   }
 
   @Get('filters')
   filters() {
     return this.repo.filters();
+  }
+
+  @Get('taxonomy')
+  taxonomy() {
+    return this.repo.taxonomy();
+  }
+
+  @Get('taxonomy/history')
+  taxonomyHistory() {
+    return this.repo.taxonomyHistory();
+  }
+
+  @Post('taxonomy')
+  createTaxonomyItem(@Body() body: { name?: string; parentId?: string | null }) {
+    return this.repo.createTaxonomyItem(body);
+  }
+
+  @Patch('taxonomy/order')
+  reorderTaxonomy(@Body() body: { ids?: string[]; parentId?: string | null }) {
+    return this.repo.reorderTaxonomy(body);
+  }
+
+  @Patch('taxonomy/:id')
+  updateTaxonomyItem(@Param('id') id: string, @Body() body: { name?: string; kind?: 'category' | 'subcategory' }) {
+    return this.repo.updateTaxonomyItem(id, body);
+  }
+
+  @Delete('taxonomy/:id')
+  deleteTaxonomyItem(@Param('id') id: string, @Query('kind') kind?: 'category' | 'subcategory') {
+    return this.repo.deleteTaxonomyItem(id, kind);
   }
 
   @Get('details')
