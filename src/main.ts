@@ -17,6 +17,7 @@ async function bootstrap() {
       'Content-Type',
       'Pragma',
       'X-Repositorio-App-Version',
+      'X-Repo-User-Id',
     ],
   });
   await app.listen(process.env.PORT ?? 3000);

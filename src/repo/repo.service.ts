@@ -294,12 +294,15 @@ export class RepoService {
       where: { entityType: { in: ['category', 'subcategory'] } },
       take: 100,
       orderBy: { createdAt: 'desc' },
-      select: { id: true, action: true, entityId: true, changes: true, createdAt: true },
+      select: {
+        id: true, action: true, entityId: true, changes: true, createdAt: true,
+        actor: { select: { displayName: true, username: true } },
+      },
     });
     return { status: true, data };
   }
 
-  async createTaxonomyItem(body: { name?: string; parentId?: string | null }) {
+  async createTaxonomyItem(body: { name?: string; parentId?: string | null }, userId?: string) {
     const name = body.name?.trim();
     if (!name) throw new BadRequestException('O nome é obrigatório.');
     if (body.parentId) {
@@ -309,7 +312,7 @@ export class RepoService {
       if (duplicate) throw new ConflictException('Já existe uma subcategoria com este nome nesta categoria.');
       const sortOrder = await this.prisma.subcategory.count({ where: { categoryId: body.parentId, isActive: true } });
       const item = await this.prisma.subcategory.create({ data: { name, slug: `${this.slug(name)}-${Date.now().toString(36)}`, categoryId: body.parentId, sortOrder }, select: { id: true, name: true, sortOrder: true, categoryId: true } });
-      await this.writeTaxonomyAudit('CREATE', 'subcategory', item.id, { name, parentId: item.categoryId });
+      await this.writeTaxonomyAudit('CREATE', 'subcategory', item.id, { name, parentId: item.categoryId }, userId);
       this.filtersCache = undefined;
       return { status: true, data: item };
     }
@@ -317,12 +320,12 @@ export class RepoService {
     if (duplicate) throw new ConflictException('Já existe uma categoria com este nome neste nível.');
     const sortOrder = await this.prisma.category.count({ where: { isActive: true } });
     const item = await this.prisma.category.create({ data: { name, slug: `${this.slug(name)}-${Date.now().toString(36)}`, sortOrder }, select: { id: true, name: true, sortOrder: true } });
-    await this.writeTaxonomyAudit('CREATE', 'category', item.id, { name });
+    await this.writeTaxonomyAudit('CREATE', 'category', item.id, { name }, userId);
     this.filtersCache = undefined;
     return { status: true, data: item };
   }
 
-  async updateTaxonomyItem(id: string, body: { name?: string; kind?: 'category' | 'subcategory' }) {
+  async updateTaxonomyItem(id: string, body: { name?: string; kind?: 'category' | 'subcategory' }, userId?: string) {
     const name = body.name?.trim();
     if (!name) throw new BadRequestException('O nome é obrigatório.');
     if (body.kind === 'subcategory') {
@@ -331,7 +334,7 @@ export class RepoService {
       const duplicate = await this.prisma.subcategory.findFirst({ where: { id: { not: id }, name: { equals: name, mode: 'insensitive' }, categoryId: current.categoryId, isActive: true }, select: { id: true } });
       if (duplicate) throw new ConflictException('Já existe uma subcategoria com este nome nesta categoria.');
       const item = await this.prisma.subcategory.update({ where: { id }, data: { name }, select: { id: true, name: true, sortOrder: true, categoryId: true } });
-      await this.writeTaxonomyAudit('UPDATE', 'subcategory', id, { oldName: current.name, name });
+      await this.writeTaxonomyAudit('UPDATE', 'subcategory', id, { oldName: current.name, name }, userId);
       this.filtersCache = undefined;
       return { status: true, data: item };
     }
@@ -340,18 +343,18 @@ export class RepoService {
     const duplicate = await this.prisma.category.findFirst({ where: { id: { not: id }, name: { equals: name, mode: 'insensitive' }, isActive: true }, select: { id: true } });
     if (duplicate) throw new ConflictException('Já existe uma categoria com este nome.');
     const item = await this.prisma.category.update({ where: { id }, data: { name }, select: { id: true, name: true, sortOrder: true } });
-    await this.writeTaxonomyAudit('UPDATE', 'category', id, { oldName: current.name, name });
+    await this.writeTaxonomyAudit('UPDATE', 'category', id, { oldName: current.name, name }, userId);
     this.filtersCache = undefined;
     return { status: true, data: item };
   }
 
-  async deleteTaxonomyItem(id: string, kind?: 'category' | 'subcategory') {
+  async deleteTaxonomyItem(id: string, kind?: 'category' | 'subcategory', userId?: string) {
     if (kind === 'subcategory') {
       const current = await this.prisma.subcategory.findFirst({ where: { id, isActive: true }, select: { name: true, _count: { select: { communications: true } } } });
       if (!current) throw new NotFoundException('Subcategoria não encontrada.');
       if (current._count.communications) throw new ConflictException('Esta subcategoria está associada a comunicações e não pode ser eliminada.');
       await this.prisma.subcategory.update({ where: { id }, data: { isActive: false } });
-      await this.writeTaxonomyAudit('DELETE', 'subcategory', id, { name: current.name });
+      await this.writeTaxonomyAudit('DELETE', 'subcategory', id, { name: current.name }, userId);
       this.filtersCache = undefined;
       return { status: true, data: { id } };
     }
@@ -359,12 +362,12 @@ export class RepoService {
     if (!current) throw new NotFoundException('Categoria não encontrada.');
     if (current._count.subcategories) throw new ConflictException('Elimine primeiro as subcategorias desta categoria.');
     await this.prisma.category.update({ where: { id }, data: { isActive: false } });
-    await this.writeTaxonomyAudit('DELETE', 'category', id, { name: current.name });
+    await this.writeTaxonomyAudit('DELETE', 'category', id, { name: current.name }, userId);
     this.filtersCache = undefined;
     return { status: true, data: { id } };
   }
 
-  async reorderTaxonomy(body: { ids?: string[]; parentId?: string | null }) {
+  async reorderTaxonomy(body: { ids?: string[]; parentId?: string | null }, userId?: string) {
     const ids = [...new Set(body.ids ?? [])];
     if (!ids.length) throw new BadRequestException('A nova ordem é obrigatória.');
     const count = body.parentId
@@ -374,13 +377,16 @@ export class RepoService {
     await this.prisma.$transaction(ids.map((id, sortOrder) => body.parentId
       ? this.prisma.subcategory.update({ where: { id }, data: { sortOrder } })
       : this.prisma.category.update({ where: { id }, data: { sortOrder } })));
-    await this.writeTaxonomyAudit('UPDATE', body.parentId ? 'subcategory' : 'category', body.parentId ?? null, { operation: 'reorder', ids, parentId: body.parentId ?? null });
+    await this.writeTaxonomyAudit('UPDATE', body.parentId ? 'subcategory' : 'category', body.parentId ?? null, { operation: 'reorder', ids, parentId: body.parentId ?? null }, userId);
     this.filtersCache = undefined;
     return { status: true, data: { ids } };
   }
 
-  private writeTaxonomyAudit(action: 'CREATE' | 'UPDATE' | 'DELETE', entityType: 'category' | 'subcategory', entityId: string | null, changes: JsonObject) {
-    return this.prisma.auditLog.create({ data: { action, entityType, entityId, changes: this.toJson(changes) } });
+  private async writeTaxonomyAudit(action: 'CREATE' | 'UPDATE' | 'DELETE', entityType: 'category' | 'subcategory', entityId: string | null, changes: JsonObject, gboxUserId?: string) {
+    const actor = gboxUserId
+      ? await this.prisma.user.findUnique({ where: { gboxUserId }, select: { id: true } })
+      : null;
+    return this.prisma.auditLog.create({ data: { actorId: actor?.id, action, entityType, entityId, changes: this.toJson(changes) } });
   }
 
   private slug(value: string) {
