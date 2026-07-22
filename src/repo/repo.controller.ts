@@ -62,23 +62,47 @@ export class RepoController {
   }
 
   @Post('taxonomy')
-  createTaxonomyItem(@Body() body: { name?: string; parentId?: string | null }) {
-    return this.repo.createTaxonomyItem(body);
+  createTaxonomyItem(
+    @Body() body: { name?: string; parentId?: string | null },
+    @Headers('x-repo-user-id') userId?: string,
+  ) {
+    return this.repo.createTaxonomyItem(body, userId);
   }
 
   @Patch('taxonomy/order')
-  reorderTaxonomy(@Body() body: { ids?: string[]; parentId?: string | null }) {
-    return this.repo.reorderTaxonomy(body);
+  reorderTaxonomy(
+    @Body() body: { ids?: string[]; parentId?: string | null },
+    @Headers('x-repo-user-id') userId?: string,
+  ) {
+    return this.repo.reorderTaxonomy(body, userId);
   }
 
   @Patch('taxonomy/:id')
-  updateTaxonomyItem(@Param('id') id: string, @Body() body: { name?: string; kind?: 'category' | 'subcategory' }) {
-    return this.repo.updateTaxonomyItem(id, body);
+  updateTaxonomyItem(
+    @Param('id') id: string,
+    @Body() body: { name?: string; kind?: 'category' | 'subcategory' },
+    @Headers('x-repo-user-id') userId?: string,
+  ) {
+    return this.repo.updateTaxonomyItem(id, body, userId);
   }
 
   @Delete('taxonomy/:id')
-  deleteTaxonomyItem(@Param('id') id: string, @Query('kind') kind?: 'category' | 'subcategory') {
-    return this.repo.deleteTaxonomyItem(id, kind);
+  deleteTaxonomyItem(
+    @Param('id') id: string,
+    @Query('kind') kind?: 'category' | 'subcategory',
+    @Headers('x-repo-user-id') userId?: string,
+  ) {
+    return this.repo.deleteTaxonomyItem(id, kind, userId);
+  }
+
+  @Patch(':type/:code/taxonomy')
+  updateCommunicationTaxonomy(
+    @Param('type') type: string,
+    @Param('code') code: string,
+    @Body() body: { categoryId?: string; subcategoryId?: string },
+    @Headers('x-repo-user-id') userId?: string,
+  ) {
+    return this.repo.updateCommunicationTaxonomy(type, code, body, userId);
   }
 
   @Get('details')
