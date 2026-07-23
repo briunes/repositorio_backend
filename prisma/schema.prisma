@@ -116,15 +116,16 @@ model RolePermission {
 }
 
 model Category {
-  id            String        @id @default(cuid())
-  name          String        @db.VarChar(120)
-  slug          String        @unique @db.VarChar(140)
-  description   String?       @db.VarChar(500)
-  sortOrder     Int           @default(0) @map("sort_order")
-  isActive      Boolean       @default(true) @map("is_active")
-  subcategories Subcategory[]
-  createdAt     DateTime      @default(now()) @map("created_at")
-  updatedAt     DateTime      @updatedAt @map("updated_at")
+  id             String                     @id @default(cuid())
+  name           String                     @db.VarChar(120)
+  slug           String                     @unique @db.VarChar(140)
+  description    String?                    @db.VarChar(500)
+  sortOrder      Int                        @default(0) @map("sort_order")
+  isActive       Boolean                    @default(true) @map("is_active")
+  subcategories  CategorySubcategory[]
+  communications CommunicationSubcategory[]
+  createdAt      DateTime                   @default(now()) @map("created_at")
+  updatedAt      DateTime                   @updatedAt @map("updated_at")
 
   @@index([sortOrder])
   @@map("categories")
@@ -132,20 +133,31 @@ model Category {
 
 model Subcategory {
   id             String                     @id @default(cuid())
-  categoryId     String                     @map("category_id")
   name           String                     @db.VarChar(120)
-  slug           String                     @db.VarChar(140)
+  slug           String                     @unique @db.VarChar(140)
   description    String?                    @db.VarChar(500)
   sortOrder      Int                        @default(0) @map("sort_order")
   isActive       Boolean                    @default(true) @map("is_active")
-  category       Category                   @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  categories     CategorySubcategory[]
   communications CommunicationSubcategory[]
   createdAt      DateTime                   @default(now()) @map("created_at")
   updatedAt      DateTime                   @updatedAt @map("updated_at")
 
-  @@unique([categoryId, slug])
-  @@index([categoryId, sortOrder])
+  @@index([sortOrder])
   @@map("subcategories")
+}
+
+model CategorySubcategory {
+  categoryId    String      @map("category_id")
+  subcategoryId String      @map("subcategory_id")
+  sortOrder     Int         @default(0) @map("sort_order")
+  category      Category    @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  subcategory   Subcategory @relation(fields: [subcategoryId], references: [id], onDelete: Cascade)
+
+  @@id([categoryId, subcategoryId])
+  @@index([subcategoryId])
+  @@index([categoryId, sortOrder])
+  @@map("category_subcategories")
 }
 
 model Channel {
@@ -195,22 +207,22 @@ model Tag {
 }
 
 model Communication {
-  id             String                  @id @default(cuid())
-  code           String                  @db.VarChar(120)
-  name           String                  @db.VarChar(255)
-  description    String?                 @db.Text
-  status         CommunicationStatus     @default(DRAFT)
-  channelId      String                  @map("channel_id")
-  sourceSystem   String?                 @map("source_system") @db.VarChar(60)
-  sourceId       String?                 @map("source_id") @db.VarChar(191)
-  templateFolder String?                 @map("template_folder") @db.VarChar(500)
+  id             String                     @id @default(cuid())
+  code           String                     @db.VarChar(120)
+  name           String                     @db.VarChar(255)
+  description    String?                    @db.Text
+  status         CommunicationStatus        @default(DRAFT)
+  channelId      String                     @map("channel_id")
+  sourceSystem   String?                    @map("source_system") @db.VarChar(60)
+  sourceId       String?                    @map("source_id") @db.VarChar(191)
+  templateFolder String?                    @map("template_folder") @db.VarChar(500)
   metadata       Json?
-  lastSyncedAt   DateTime?               @map("last_synced_at")
-  publishedAt    DateTime?               @map("published_at")
-  archivedAt     DateTime?               @map("archived_at")
-  createdAt      DateTime                @default(now()) @map("created_at")
-  updatedAt      DateTime                @updatedAt @map("updated_at")
-  channel        Channel                 @relation(fields: [channelId], references: [id], onDelete: Restrict)
+  lastSyncedAt   DateTime?                  @map("last_synced_at")
+  publishedAt    DateTime?                  @map("published_at")
+  archivedAt     DateTime?                  @map("archived_at")
+  createdAt      DateTime                   @default(now()) @map("created_at")
+  updatedAt      DateTime                   @updatedAt @map("updated_at")
+  channel        Channel                    @relation(fields: [channelId], references: [id], onDelete: Restrict)
   versions       CommunicationVersion[]
   subcategories  CommunicationSubcategory[]
   services       CommunicationService[]
@@ -311,11 +323,14 @@ model CommunicationVariable {
 
 model CommunicationSubcategory {
   communicationId String        @map("communication_id")
+  categoryId      String        @map("category_id")
   subcategoryId   String        @map("subcategory_id")
   communication   Communication @relation(fields: [communicationId], references: [id], onDelete: Cascade)
+  category        Category      @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   subcategory     Subcategory   @relation(fields: [subcategoryId], references: [id], onDelete: Cascade)
 
-  @@id([communicationId, subcategoryId])
+  @@id([communicationId, categoryId, subcategoryId])
+  @@index([categoryId])
   @@index([subcategoryId])
   @@map("communication_subcategories")
 }

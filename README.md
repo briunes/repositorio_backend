@@ -1,6 +1,7 @@
 # Repositório de Comunicações — backend
 
-NestJS API backed by Supabase PostgreSQL and Prisma. This service owns application data and
+NestJS API backed at runtime by the Supabase Data API. Prisma is retained only
+for schema generation and migrations. This service owns application data and
 authorization; GBox remains the authentication provider.
 
 ## Data model
@@ -31,14 +32,11 @@ pnpm dev
 ```
 
 `db:deploy` applies committed migrations to Supabase and is the right command
-for existing environments and CI. Use Supabase's direct connection for
-`DIRECT_URL`; use the session/transaction pooler connection appropriate for the
-deployed backend in `DATABASE_URL`.
-
-For serverless deployments such as Vercel, `DATABASE_URL` must use Supavisor
-transaction mode on port `6543` with `pgbouncer=true&connection_limit=1`. Keep
-`DIRECT_URL` on session/direct mode for Prisma migrations only. This prevents
-separate function instances from exhausting Supabase's session client limit.
+for existing environments and CI. `DIRECT_URL` is migration-only. Runtime
+NestJS endpoints do not instantiate Prisma or open PostgreSQL/Supavisor
+connections; they use PostgREST through `SUPABASE_URL` and the backend-only
+`SUPABASE_SECRET_KEY`. `DATABASE_URL` is retained only for Prisma CLI workflows
+that require it and must not be used by deployed request handlers.
 
 Useful commands:
 
@@ -73,11 +71,11 @@ the seed intentionally does not create an administrator account.
 
 ## Supabase Data API
 
-The global `SupabaseService` provides a server-only Supabase client for modules
-that need Supabase Auth, Storage, Realtime or the generated Data API. Configure
-`SUPABASE_URL` and `SUPABASE_SECRET_KEY` in the backend `.env`. The optional
-`SUPABASE_REGION` value is deployment metadata and is returned by the health
-check; API routing itself uses the project URL.
+The global `SupabaseService` and API database adapter provide server-only
+access to PostgREST and RPCs. Configure `SUPABASE_URL`,
+`SUPABASE_SECRET_KEY`, and `SUPABASE_DB_SCHEMA` in the backend environment.
+The configured Supabase region is `eu-west-1` (Ireland), colocated with the
+Vercel `dub1` deployment region.
 
 Check connectivity with:
 
@@ -90,9 +88,13 @@ The secret key bypasses Row Level Security and must never be prefixed with
 Browser access requires a separate Supabase publishable key and appropriate RLS
 policies.
 
-The Data API client and Prisma serve different purposes: the Supabase client is
-available for Auth, Storage, Realtime and PostgREST, while Prisma uses the
-PostgreSQL connection for the application's relational data and migrations.
+The Data API handles all deployed application reads and writes. Prisma uses a
+database connection only in explicit migration, seed, import, and maintenance
+commands outside request handling.
+
+API responses include `Server-Timing` and `X-Data-Source: supabase-api` headers
+so browser tooling shows total application time, Supabase API duration/call
+count, and cache status for instrumented cached endpoints.
 
 ## Frontend integration
 
