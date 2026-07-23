@@ -7,11 +7,9 @@ export class PrismaService
   implements OnModuleInit, OnModuleDestroy
 {
   constructor() {
-    const datasourceUrl = process.env.DATABASE_URL?.replace(
-      /connection_limit=\d+/,
-      'connection_limit=4',
-    );
-    super(datasourceUrl ? { datasourceUrl } : undefined);
+    // This class is retained for explicit CLI/import tooling. Nest runtime
+    // injects the Supabase Data API adapter under this token instead.
+    super();
   }
 
   async onModuleInit() {

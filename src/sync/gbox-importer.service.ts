@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { CommunicationStatus, Prisma, VersionStatus } from '@prisma/client';
+import { Prisma, VersionStatus } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import {
   GboxLocalizedVersion,
@@ -123,12 +123,10 @@ export class GboxImporterService {
         id: true,
         sourceId: true,
         metadata: true,
-        subcategories: { select: { subcategoryId: true } },
+        subcategories: { select: { categoryId: true, subcategoryId: true } },
       },
     });
-    const existing = new Map(
-      existingRows.map((row) => [row.sourceId!, row]),
-    );
+    const existing = new Map(existingRows.map((row) => [row.sourceId!, row]));
     const now = new Date();
     const missing = entries.filter(
       ({ channel, code }) => !existing.has(`${channel}:${code}`),
@@ -174,10 +172,13 @@ export class GboxImporterService {
               this.stableJson(old!.metadata) ===
                 this.stableJson(entry.template) &&
               this.sameIds(
-                old!.subcategories.map(({ subcategoryId }) => subcategoryId),
+                old!.subcategories.map(
+                  ({ categoryId, subcategoryId }) =>
+                    `${categoryId}:${subcategoryId}`,
+                ),
                 this.taxonomyPairs(entry.template).map(
                   ({ category, subcategory }) =>
-                    lookups.subcategories.get(`${category}:${subcategory}`)!,
+                    `${lookups.categories.get(category)!}:${lookups.subcategories.get(`${category}:${subcategory}`)!}`,
                 ),
               ),
           },
@@ -201,11 +202,12 @@ export class GboxImporterService {
       code,
       name: template.nome?.trim() || code,
       description: template.desc?.trim(),
-      status: (latestDate && latestDate > now
-        ? 'SCHEDULED'
-        : versions.length
-          ? 'AVAILABLE'
-          : 'UNAVAILABLE') as CommunicationStatus,
+      status:
+        latestDate && latestDate > now
+          ? 'SCHEDULED'
+          : versions.length
+            ? 'AVAILABLE'
+            : 'UNAVAILABLE',
       sourceSystem: 'GBOX',
       sourceId: `${channel}:${code}`,
       templateFolder: template.templateFolder,
@@ -268,20 +270,29 @@ export class GboxImporterService {
         create: { name, slug: this.slug(name) },
       });
       categoryMap.set(name, category.id);
-      for (const subcategoryName of
-        subcategoryNamesByCategory.get(name) ?? []) {
+      for (const [sortOrder, subcategoryName] of [
+        ...(subcategoryNamesByCategory.get(name) ?? []),
+      ].entries()) {
         const subcategory = await this.prisma.subcategory.upsert({
-          where: {
-            categoryId_slug: {
-              categoryId: category.id,
-              slug: this.slug(subcategoryName),
-            },
-          },
+          where: { slug: this.slug(subcategoryName) },
           update: { name: subcategoryName, isActive: true },
           create: {
-            categoryId: category.id,
             name: subcategoryName,
             slug: this.slug(subcategoryName),
+          },
+        });
+        await this.prisma.categorySubcategory.upsert({
+          where: {
+            categoryId_subcategoryId: {
+              categoryId: category.id,
+              subcategoryId: subcategory.id,
+            },
+          },
+          update: {},
+          create: {
+            categoryId: category.id,
+            subcategoryId: subcategory.id,
+            sortOrder,
           },
         });
         subcategoryMap.set(`${name}:${subcategoryName}`, subcategory.id);
@@ -306,18 +317,42 @@ export class GboxImporterService {
       .filter(Boolean)
       .map((name) => ({ name, slug: this.slug(name) }));
     if (model === 'service') {
-      await this.prisma.service.createMany({ data: values, skipDuplicates: true });
-      const rows = await this.prisma.service.findMany({ where: { slug: { in: values.map(({ slug }) => slug) } } });
-      return new Map(values.map(({ name, slug }) => [name, rows.find((row) => row.slug === slug)!.id]));
+      await this.prisma.service.createMany({
+        data: values,
+        skipDuplicates: true,
+      });
+      const rows = await this.prisma.service.findMany({
+        where: { slug: { in: values.map(({ slug }) => slug) } },
+      });
+      return new Map(
+        values.map(({ name, slug }) => [
+          name,
+          rows.find((row) => row.slug === slug)!.id,
+        ]),
+      );
     }
     if (model === 'team') {
       await this.prisma.team.createMany({ data: values, skipDuplicates: true });
-      const rows = await this.prisma.team.findMany({ where: { slug: { in: values.map(({ slug }) => slug) } } });
-      return new Map(values.map(({ name, slug }) => [name, rows.find((row) => row.slug === slug)!.id]));
+      const rows = await this.prisma.team.findMany({
+        where: { slug: { in: values.map(({ slug }) => slug) } },
+      });
+      return new Map(
+        values.map(({ name, slug }) => [
+          name,
+          rows.find((row) => row.slug === slug)!.id,
+        ]),
+      );
     }
     await this.prisma.tag.createMany({ data: values, skipDuplicates: true });
-    const rows = await this.prisma.tag.findMany({ where: { slug: { in: values.map(({ slug }) => slug) } } });
-    return new Map(values.map(({ name, slug }) => [name, rows.find((row) => row.slug === slug)!.id]));
+    const rows = await this.prisma.tag.findMany({
+      where: { slug: { in: values.map(({ slug }) => slug) } },
+    });
+    return new Map(
+      values.map(({ name, slug }) => [
+        name,
+        rows.find((row) => row.slug === slug)!.id,
+      ]),
+    );
   }
 
   private async importCommunication(
@@ -334,7 +369,7 @@ export class GboxImporterService {
     if (communication.contentIsUnchanged) return versions.length;
 
     const taxonomyPairs = this.taxonomyPairs(template);
-    await this.prisma.$transaction([
+    await Promise.all([
       this.prisma.communicationVersion.deleteMany({
         where: { communicationId: communication.id },
       }),
@@ -350,10 +385,15 @@ export class GboxImporterService {
       this.prisma.communicationTag.deleteMany({
         where: { communicationId: communication.id },
       }),
+    ]);
+    await this.prisma.$transaction([
       this.prisma.communicationSubcategory.createMany({
         data: taxonomyPairs.map(({ category, subcategory }) => ({
           communicationId: communication.id,
-          subcategoryId: lookups.subcategories.get(`${category}:${subcategory}`)!,
+          categoryId: lookups.categories.get(category)!,
+          subcategoryId: lookups.subcategories.get(
+            `${category}:${subcategory}`,
+          )!,
         })),
       }),
       this.prisma.communicationService.createMany({
@@ -455,20 +495,22 @@ export class GboxImporterService {
   }
 
   private taxonomyPairs(template: GboxTemplate) {
-    const categories = (template.categoria?.length
-      ? template.categoria
-      : ['Sem categoria']
+    const categories = (
+      template.categoria?.length ? template.categoria : ['Sem categoria']
     ).map((value) => value.trim());
-    const subcategories = (template.subcategoria?.length
-      ? template.subcategoria
-      : ['Sem subcategoria']
+    const subcategories = (
+      template.subcategoria?.length
+        ? template.subcategoria
+        : ['Sem subcategoria']
     ).map((value) => value.trim());
     const pairs = categories.flatMap((category) =>
       subcategories.map((subcategory) => ({ category, subcategory })),
     );
-    return [...new Map(
-      pairs.map((pair) => [`${pair.category}:${pair.subcategory}`, pair]),
-    ).values()];
+    return [
+      ...new Map(
+        pairs.map((pair) => [`${pair.category}:${pair.subcategory}`, pair]),
+      ).values(),
+    ];
   }
 
   private sameIds(left: string[], right: string[]) {
