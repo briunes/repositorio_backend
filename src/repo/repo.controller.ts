@@ -133,7 +133,7 @@ export class RepoController {
   updateCommunicationTaxonomy(
     @Param('type') type: string,
     @Param('code') code: string,
-    @Body() body: { categoryId?: string; subcategoryId?: string },
+    @Body() body: { categoryIds?: string[]; subcategoryId?: string },
     @Headers('x-repo-user-id') userId?: string,
   ) {
     return this.repo.updateCommunicationTaxonomy(type, code, body, userId);
@@ -145,7 +145,7 @@ export class RepoController {
     @Headers('authorization') authorization?: string,
   ) {
     void authorization;
-    return this.repo.details(query.tipo, query.codigo, query.lang);
+    return this.repo.details(query.tipo, query.codigo, query.lang, query.version);
   }
 
   @Get(':type/:code')
@@ -156,6 +156,6 @@ export class RepoController {
     @Headers('authorization') authorization?: string,
   ) {
     void authorization;
-    return this.repo.details(type, code, query.lang);
+    return this.repo.details(type, code, query.lang, query.version);
   }
 }
