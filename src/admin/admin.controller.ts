@@ -1,4 +1,13 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Put } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Put,
+} from '@nestjs/common';
 import { AdminService } from './admin.service';
 
 @Controller('admin')
@@ -21,17 +30,31 @@ export class AdminController {
   }
 
   @Put('users/:id/roles')
-  updateUserRoles(@Param('id') id: string, @Body() body: { roleIds?: string[] }) {
+  updateUserRoles(
+    @Param('id') id: string,
+    @Body() body: { roleIds?: string[] },
+  ) {
     return this.admin.updateUserRoles(id, body.roleIds);
   }
 
   @Post('roles')
-  createRole(@Body() body: { name?: string; description?: string; permissionIds?: string[] }) {
+  createRole(
+    @Body()
+    body: {
+      name?: string;
+      description?: string;
+      permissionIds?: string[];
+    },
+  ) {
     return this.admin.createRole(body);
   }
 
   @Patch('roles/:id')
-  updateRole(@Param('id') id: string, @Body() body: { name?: string; description?: string; permissionIds?: string[] }) {
+  updateRole(
+    @Param('id') id: string,
+    @Body()
+    body: { name?: string; description?: string; permissionIds?: string[] },
+  ) {
     return this.admin.updateRole(id, body);
   }
 

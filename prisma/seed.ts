@@ -8,7 +8,10 @@ const permissions = [
   ['communications.update', 'Editar comunicações e versões em rascunho'],
   ['communications.publish', 'Publicar e agendar versões de comunicações'],
   ['communications.archive', 'Arquivar comunicações'],
-  ['taxonomy.manage', 'Gerir categorias, serviços, equipas, etiquetas e canais'],
+  [
+    'taxonomy.manage',
+    'Gerir categorias, serviços, equipas, etiquetas e canais',
+  ],
   ['users.read', 'Consultar utilizadores da aplicação'],
   ['users.manage', 'Ativar, bloquear e atribuir funções a utilizadores'],
   ['roles.manage', 'Gerir funções e permissões'],
@@ -35,11 +38,7 @@ const rolePermissions: Record<string, string[]> = {
 const roles = [
   ['viewer', 'Leitor', 'Pode consultar o repositório de comunicações'],
   ['editor', 'Editor', 'Pode criar e editar comunicações em rascunho'],
-  [
-    'publisher',
-    'Publicador',
-    'Pode publicar, agendar e arquivar comunicações',
-  ],
+  ['publisher', 'Publicador', 'Pode publicar, agendar e arquivar comunicações'],
   ['admin', 'Administrador', 'Administração completa da aplicação'],
 ] as const;
 
@@ -115,10 +114,28 @@ async function main() {
       create: { name, slug: slug(key), sortOrder: categoryOrder },
     });
     for (const [sortOrder, subcategoryName] of categories.entries()) {
-      await prisma.subcategory.upsert({
-        where: { categoryId_slug: { categoryId: category.id, slug: slug(subcategoryName) } },
-        update: { name: subcategoryName, sortOrder, isActive: true },
-        create: { categoryId: category.id, name: subcategoryName, slug: slug(subcategoryName), sortOrder },
+      const subcategory = await prisma.subcategory.upsert({
+        where: { slug: slug(subcategoryName) },
+        update: { name: subcategoryName, isActive: true },
+        create: {
+          name: subcategoryName,
+          slug: slug(subcategoryName),
+          sortOrder,
+        },
+      });
+      await prisma.categorySubcategory.upsert({
+        where: {
+          categoryId_subcategoryId: {
+            categoryId: category.id,
+            subcategoryId: subcategory.id,
+          },
+        },
+        update: { sortOrder },
+        create: {
+          categoryId: category.id,
+          subcategoryId: subcategory.id,
+          sortOrder,
+        },
       });
     }
   }

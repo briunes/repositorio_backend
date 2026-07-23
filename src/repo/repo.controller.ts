@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   Headers,
   Param,
   Patch,
@@ -29,8 +30,9 @@ export class RepoController {
   }
 
   @Get()
-  templates() {
-    return this.repo.templates();
+  @Header('Cache-Control', 'no-store')
+  templates(@Headers('authorization') authorization?: string) {
+    return this.repo.templates(authorization);
   }
 
   @Post('sync')
@@ -47,23 +49,32 @@ export class RepoController {
   }
 
   @Get('filters')
+  @Header('Cache-Control', 'no-store')
   filters() {
     return this.repo.filters();
   }
 
   @Get('taxonomy')
+  @Header('Cache-Control', 'no-store')
   taxonomy() {
     return this.repo.taxonomy();
   }
 
   @Get('taxonomy/history')
+  @Header('Cache-Control', 'no-store')
   taxonomyHistory() {
     return this.repo.taxonomyHistory();
   }
 
   @Post('taxonomy')
   createTaxonomyItem(
-    @Body() body: { name?: string; parentId?: string | null },
+    @Body()
+    body: {
+      name?: string;
+      description?: string | null;
+      kind?: 'category' | 'subcategory';
+      parentId?: string | null;
+    },
     @Headers('x-repo-user-id') userId?: string,
   ) {
     return this.repo.createTaxonomyItem(body, userId);
@@ -77,10 +88,33 @@ export class RepoController {
     return this.repo.reorderTaxonomy(body, userId);
   }
 
+  @Post('taxonomy/assign')
+  assignSubcategory(
+    @Body()
+    body: { categoryId?: string; subcategoryId?: string; sortOrder?: number },
+    @Headers('x-repo-user-id') userId?: string,
+  ) {
+    return this.repo.assignSubcategory(body, userId);
+  }
+
+  @Delete('taxonomy/assign')
+  unassignSubcategory(
+    @Query('categoryId') categoryId: string,
+    @Query('subcategoryId') subcategoryId: string,
+    @Headers('x-repo-user-id') userId?: string,
+  ) {
+    return this.repo.unassignSubcategory(categoryId, subcategoryId, userId);
+  }
+
   @Patch('taxonomy/:id')
   updateTaxonomyItem(
     @Param('id') id: string,
-    @Body() body: { name?: string; kind?: 'category' | 'subcategory' },
+    @Body()
+    body: {
+      name?: string;
+      description?: string | null;
+      kind?: 'category' | 'subcategory';
+    },
     @Headers('x-repo-user-id') userId?: string,
   ) {
     return this.repo.updateTaxonomyItem(id, body, userId);

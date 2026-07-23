@@ -10,5 +10,6 @@ import { VersionService } from './version.service';
     VersionService,
     { provide: APP_INTERCEPTOR, useClass: VersionInterceptor },
   ],
+  exports: [VersionService],
 })
 export class VersionModule {}

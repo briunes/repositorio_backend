@@ -1,9 +1,18 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
+import { VersionService } from '../version/version.service';
 
 @Injectable()
 export class AdminService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly versions: VersionService,
+  ) {}
 
   async users() {
     const data = await this.prisma.user.findMany({
@@ -16,7 +25,9 @@ export class AdminService {
         status: true,
         lastLoginAt: true,
         createdAt: true,
-        roles: { select: { role: { select: { id: true, key: true, name: true } } } },
+        roles: {
+          select: { role: { select: { id: true, key: true, name: true } } },
+        },
       },
     });
     return { status: true, data };
@@ -33,7 +44,9 @@ export class AdminService {
         isSystem: true,
         _count: { select: { users: true } },
         permissions: {
-          select: { permission: { select: { id: true, key: true, description: true } } },
+          select: {
+            permission: { select: { id: true, key: true, description: true } },
+          },
           orderBy: { permission: { key: 'asc' } },
         },
       },
@@ -42,23 +55,34 @@ export class AdminService {
   }
 
   async permissions() {
-    const data = await this.prisma.permission.findMany({ orderBy: { key: 'asc' } });
+    const data = await this.prisma.permission.findMany({
+      orderBy: { key: 'asc' },
+    });
     return { status: true, data };
   }
 
   async updateUserRoles(userId: string, roleIds: string[] = []) {
-    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true } });
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true },
+    });
     if (!user) throw new NotFoundException('Utilizador não encontrado.');
     const uniqueRoleIds = [...new Set(roleIds)];
     await this.assertPermissionsExist('role', uniqueRoleIds);
-    await this.prisma.$transaction([
-      this.prisma.userRole.deleteMany({ where: { userId } }),
-      ...(uniqueRoleIds.length ? [this.prisma.userRole.createMany({ data: uniqueRoleIds.map((roleId) => ({ userId, roleId })) })] : []),
-    ]);
+    await this.prisma.userRole.deleteMany({ where: { userId } });
+    if (uniqueRoleIds.length) {
+      await this.prisma.userRole.createMany({
+        data: uniqueRoleIds.map((roleId) => ({ userId, roleId })),
+      });
+    }
     return { status: true, data: { userId, roleIds: uniqueRoleIds } };
   }
 
-  async createRole(body: { name?: string; description?: string; permissionIds?: string[] }) {
+  async createRole(body: {
+    name?: string;
+    description?: string;
+    permissionIds?: string[];
+  }) {
     const name = body.name?.trim();
     if (!name) throw new BadRequestException('O nome da função é obrigatório.');
     const permissionIds = [...new Set(body.permissionIds ?? [])];
@@ -69,33 +93,58 @@ export class AdminService {
         key,
         name,
         description: body.description?.trim() || null,
-        permissions: { create: permissionIds.map((permissionId) => ({ permissionId })) },
+        permissions: {
+          create: permissionIds.map((permissionId) => ({ permissionId })),
+        },
       },
       select: { id: true },
     });
     return { status: true, data: role };
   }
 
-  async updateRole(id: string, body: { name?: string; description?: string; permissionIds?: string[] }) {
-    const role = await this.prisma.role.findUnique({ where: { id }, select: { id: true } });
+  async updateRole(
+    id: string,
+    body: { name?: string; description?: string; permissionIds?: string[] },
+  ) {
+    const role = await this.prisma.role.findUnique({
+      where: { id },
+      select: { id: true },
+    });
     if (!role) throw new NotFoundException('Função não encontrada.');
     const name = body.name?.trim();
     if (!name) throw new BadRequestException('O nome da função é obrigatório.');
     const permissionIds = [...new Set(body.permissionIds ?? [])];
     await this.assertPermissionsExist('permission', permissionIds);
-    await this.prisma.$transaction([
-      this.prisma.role.update({ where: { id }, data: { name, description: body.description?.trim() || null } }),
-      this.prisma.rolePermission.deleteMany({ where: { roleId: id } }),
-      ...(permissionIds.length ? [this.prisma.rolePermission.createMany({ data: permissionIds.map((permissionId) => ({ roleId: id, permissionId })) })] : []),
-    ]);
+    await this.prisma.role.update({
+      where: { id },
+      data: { name, description: body.description?.trim() || null },
+    });
+    await this.prisma.rolePermission.deleteMany({ where: { roleId: id } });
+    if (permissionIds.length) {
+      await this.prisma.rolePermission.createMany({
+        data: permissionIds.map((permissionId) => ({
+          roleId: id,
+          permissionId,
+        })),
+      });
+    }
     return { status: true, data: { id } };
   }
 
   async deleteRole(id: string) {
-    const role = await this.prisma.role.findUnique({ where: { id }, select: { isSystem: true, _count: { select: { users: true } } } });
+    const role = await this.prisma.role.findUnique({
+      where: { id },
+      select: { isSystem: true, _count: { select: { users: true } } },
+    });
     if (!role) throw new NotFoundException('Função não encontrada.');
-    if (role.isSystem) throw new ConflictException('As funções de sistema não podem ser eliminadas.');
-    if (role._count.users) throw new ConflictException('Remova esta função dos utilizadores antes de a eliminar.');
+    if (role.isSystem)
+      throw new ConflictException(
+        'As funções de sistema não podem ser eliminadas.',
+      );
+    if (role._count.users)
+      throw new ConflictException(
+        'Remova esta função dos utilizadores antes de a eliminar.',
+      );
     await this.prisma.role.delete({ where: { id } });
     return { status: true, data: { id } };
   }
@@ -132,26 +181,48 @@ export class AdminService {
 
   async updateVersion(version?: string) {
     const normalized = version?.trim();
-    if (!normalized || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(normalized))
-      throw new BadRequestException('Indique uma versão válida, por exemplo 1.2.3.');
+    if (
+      !normalized ||
+      !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(normalized)
+    )
+      throw new BadRequestException(
+        'Indique uma versão válida, por exemplo 1.2.3.',
+      );
     const data = await this.prisma.systemConfig.upsert({
       where: { id: 'default' },
       update: { appVersion: normalized },
       create: { id: 'default', appVersion: normalized },
       select: { appVersion: true, updatedAt: true },
     });
+    this.versions.invalidate();
     return { status: true, data };
   }
 
-  private async assertPermissionsExist(model: 'role' | 'permission', ids: string[]) {
+  private async assertPermissionsExist(
+    model: 'role' | 'permission',
+    ids: string[],
+  ) {
     if (!ids.length) return;
-    const count = model === 'role'
-      ? await this.prisma.role.count({ where: { id: { in: ids } } })
-      : await this.prisma.permission.count({ where: { id: { in: ids } } });
-    if (count !== ids.length) throw new BadRequestException(model === 'role' ? 'Uma ou mais funções são inválidas.' : 'Uma ou mais permissões são inválidas.');
+    const count =
+      model === 'role'
+        ? await this.prisma.role.count({ where: { id: { in: ids } } })
+        : await this.prisma.permission.count({ where: { id: { in: ids } } });
+    if (count !== ids.length)
+      throw new BadRequestException(
+        model === 'role'
+          ? 'Uma ou mais funções são inválidas.'
+          : 'Uma ou mais permissões são inválidas.',
+      );
   }
 
   private slug(value: string) {
-    return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'role';
+    return (
+      value
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/(^-|-$)/g, '') || 'role'
+    );
   }
 }
