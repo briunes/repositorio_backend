@@ -6,11 +6,8 @@ export class VersionController {
   constructor(private readonly versions: VersionService) {}
 
   @Get()
-  @Header(
-    'Cache-Control',
-    'public, max-age=60, s-maxage=60, stale-while-revalidate=300',
-  )
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate')
   async current() {
-    return { status: true, data: { version: await this.versions.current() } };
+    return { status: true, data: { version: await this.versions.currentFresh() } };
   }
 }

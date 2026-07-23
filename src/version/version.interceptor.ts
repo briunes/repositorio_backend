@@ -11,6 +11,17 @@ import { VersionService } from './version.service';
 
 export const APP_VERSION_HEADER = 'x-repositorio-app-version';
 
+function compareVersions(left: string, right: string) {
+  const leftParts = left.split('.').map(Number);
+  const rightParts = right.split('.').map(Number);
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = (leftParts[index] || 0) - (rightParts[index] || 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
 @Injectable()
 export class VersionInterceptor implements NestInterceptor {
   constructor(private readonly versions: VersionService) {}
@@ -25,7 +36,7 @@ export class VersionInterceptor implements NestInterceptor {
     if (frontendVersion && request.path !== '/version') {
       const currentVersion = await this.versions.current();
 
-      if (frontendVersion !== currentVersion) {
+      if (compareVersions(frontendVersion, currentVersion) < 0) {
         throw new ConflictException({
           status: false,
           appVersion: currentVersion,

@@ -31,11 +31,6 @@ export class VersionService {
   }
 
   async current() {
-    if (this.configuredVersion) {
-      markRequestCache('config');
-      return this.configuredVersion;
-    }
-
     if (this.cache && this.cache.expiresAt > Date.now()) {
       markRequestCache('hit');
       return this.cache.version;
@@ -52,6 +47,13 @@ export class VersionService {
     }
   }
 
+  async currentFresh() {
+    markRequestCache('miss');
+    const version = await this.loadCurrent();
+    this.cache = { version, expiresAt: Date.now() + this.cacheTtlMs };
+    return version;
+  }
+
   invalidate() {
     this.cache = undefined;
   }
@@ -65,6 +67,6 @@ export class VersionService {
       .maybeSingle<{ appVersion: string }>();
     recordSupabaseCall(performance.now() - startedAt);
     if (error) throw error;
-    return data?.appVersion ?? FALLBACK_VERSION;
+    return data?.appVersion ?? this.configuredVersion ?? FALLBACK_VERSION;
   }
 }
