@@ -177,7 +177,7 @@ export class RepoService {
     return { status: true, data };
   }
 
-  async details(type: string, code: string, locale = 'PT') {
+  async details(type: string, code: string, locale = 'PT', requestedVersion?: string) {
     const channel = type.toUpperCase() === 'PUSH' ? 'BLIP' : type.toUpperCase();
     const communication = await this.prisma.communication.findFirst({
       where: { code, channel: { key: channel } },
@@ -197,7 +197,11 @@ export class RepoService {
         { status: false, message: 'Communication not found.' },
         404,
       );
-    const version = communication.versions[0];
+    const version = requestedVersion
+      ? communication.versions.find(({ version: value }) => value === requestedVersion)
+      : communication.versions[0];
+    if (requestedVersion && !version)
+      throw new NotFoundException('Versão da comunicação não encontrada.');
     const localization =
       version?.localizations.find(
         (item) => item.locale.toUpperCase() === locale.toUpperCase(),
@@ -820,10 +824,11 @@ export class RepoService {
   async updateCommunicationTaxonomy(
     type: string,
     code: string,
-    body: { categoryId?: string; subcategoryId?: string },
+    body: { categoryIds?: string[]; subcategoryId?: string },
     gboxUserId?: string,
   ) {
-    if (!body.categoryId || !body.subcategoryId)
+    const categoryIds = [...new Set(body.categoryIds ?? [])];
+    if (!categoryIds.length || !body.subcategoryId)
       throw new BadRequestException(
         'A categoria e a subcategoria são obrigatórias.',
       );
@@ -833,6 +838,7 @@ export class RepoService {
         where: { code, channel: { key: channel } },
         select: {
           id: true,
+          channel: { select: { id: true } },
           subcategories: {
             select: {
               category: { select: { name: true } },
@@ -841,9 +847,9 @@ export class RepoService {
           },
         },
       }),
-      this.prisma.categorySubcategory.findFirst({
+      this.prisma.categorySubcategory.findMany({
         where: {
-          categoryId: body.categoryId,
+          categoryId: { in: categoryIds },
           subcategoryId: body.subcategoryId,
           category: { isActive: true },
           subcategory: { isActive: true },
@@ -862,10 +868,16 @@ export class RepoService {
     ]);
     if (!communication)
       throw new NotFoundException('Comunicação não encontrada.');
-    if (!subcategory)
+    if (subcategory.length !== categoryIds.length)
       throw new BadRequestException(
-        'A subcategoria não pertence à categoria selecionada.',
+        'A subcategoria não pertence a todas as categorias selecionadas.',
       );
+
+    const assignments = categoryIds.map((categoryId) =>
+      subcategory.find(({ category }) => category.id === categoryId),
+    ).filter((assignment): assignment is NonNullable<typeof assignment> => Boolean(assignment));
+    const categoryNames = assignments.map(({ category }) => category.name);
+    const selectedSubcategory = assignments[0].subcategory;
 
     const previous = communication.subcategories.map(
       ({ category, subcategory: item }) => ({
@@ -877,13 +889,9 @@ export class RepoService {
       where: { communicationId: communication.id },
     });
     await this.prisma.$transaction([
-      this.prisma.communicationSubcategory.create({
-        data: {
-          communicationId: communication.id,
-          categoryId: subcategory.category.id,
-          subcategoryId: subcategory.subcategory.id,
-        },
-      }),
+      ...assignments.map((assignment) => this.prisma.communicationSubcategory.create({
+        data: { communicationId: communication.id, categoryId: assignment.category.id, subcategoryId: selectedSubcategory.id },
+      })),
       this.prisma.auditLog.create({
         data: {
           actorId: actor?.id,
@@ -893,16 +901,16 @@ export class RepoService {
           changes: this.toJson({
             operation: 'taxonomy',
             previous,
-            category: subcategory.category.name,
-            subcategory: subcategory.subcategory.name,
+            categories: categoryNames,
+            subcategory: selectedSubcategory.name,
           }),
         },
       }),
       this.prisma.$executeRaw`
         UPDATE repository_snapshots
         SET payload = jsonb_set(
-          jsonb_set(payload, ARRAY[${channel}, ${code}, 'categoria']::text[], ${JSON.stringify([subcategory.category.name])}::jsonb, true),
-          ARRAY[${channel}, ${code}, 'subcategoria']::text[], ${JSON.stringify([subcategory.subcategory.name])}::jsonb, true
+          jsonb_set(payload, ARRAY[${channel}, ${code}, 'categoria']::text[], ${JSON.stringify(categoryNames)}::jsonb, true),
+          ARRAY[${channel}, ${code}, 'subcategoria']::text[], ${JSON.stringify([selectedSubcategory.name])}::jsonb, true
         ), synced_at = NOW()
         WHERE key = 'gbox-templates'
       `,
@@ -911,8 +919,8 @@ export class RepoService {
     return {
       status: true,
       data: {
-        category: subcategory.category.name,
-        subcategory: subcategory.subcategory.name,
+        categories: categoryNames,
+        subcategory: selectedSubcategory.name,
       },
     };
   }
