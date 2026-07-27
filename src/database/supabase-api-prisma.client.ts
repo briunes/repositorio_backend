@@ -1095,7 +1095,10 @@ export const createSupabaseApiPrismaClient = (): any => {
         p_channel: values[0],
         p_code: values[1],
         p_categories: JSON.parse(String(values[2])),
-        p_subcategories: JSON.parse(String(values[3])),
+        // The raw query repeats channel and code in the second jsonb_set path,
+        // so the interpolation order is channel, code, categories, channel,
+        // code, subcategories.
+        p_subcategories: JSON.parse(String(values[5])),
       });
       return execute ? 1 : [];
     }

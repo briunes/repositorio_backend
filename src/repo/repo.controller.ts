@@ -48,6 +48,11 @@ export class RepoController {
     return this.repo.syncDetails(authorization);
   }
 
+  @Post('sync/rows')
+  syncRows(@Headers('authorization') authorization?: string) {
+    return this.repo.syncRows(authorization);
+  }
+
   @Get('filters')
   @Header('Cache-Control', 'no-store')
   filters() {
@@ -133,7 +138,7 @@ export class RepoController {
   updateCommunicationTaxonomy(
     @Param('type') type: string,
     @Param('code') code: string,
-    @Body() body: { categoryIds?: string[]; subcategoryId?: string },
+    @Body() body: { categoryIds?: string[]; subcategoryIds?: string[] },
     @Headers('x-repo-user-id') userId?: string,
   ) {
     return this.repo.updateCommunicationTaxonomy(type, code, body, userId);
