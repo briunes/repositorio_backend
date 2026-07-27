@@ -230,6 +230,7 @@ export class GboxImporterService {
   private async prepareLookups(entries: ImportEntry[]) {
     const channels = new Set(entries.map(({ channel }) => channel));
     const categoryNames = new Set<string>();
+    const subcategoryNames = new Set<string>();
     const subcategoryNamesByCategory = new Map<string, Set<string>>();
     const services = new Set<string>();
     const teams = new Set<string>();
@@ -238,6 +239,7 @@ export class GboxImporterService {
     for (const { template } of entries) {
       for (const { category, subcategory } of this.taxonomyPairs(template)) {
         categoryNames.add(category);
+        subcategoryNames.add(subcategory);
         const subcategories =
           subcategoryNamesByCategory.get(category) ?? new Set<string>();
         subcategories.add(subcategory);
@@ -262,6 +264,15 @@ export class GboxImporterService {
       });
       channelMap.set(key, row.id);
     }
+    const sharedSubcategoryMap = new Map<string, string>();
+    for (const name of subcategoryNames) {
+      const subcategory = await this.prisma.subcategory.upsert({
+        where: { slug: this.slug(name) },
+        update: { name, isActive: true },
+        create: { name, slug: this.slug(name) },
+      });
+      sharedSubcategoryMap.set(name, subcategory.id);
+    }
     const categoryMap = new Map<string, string>();
     for (const name of categoryNames) {
       const category = await this.prisma.category.upsert({
@@ -273,29 +284,22 @@ export class GboxImporterService {
       for (const [sortOrder, subcategoryName] of [
         ...(subcategoryNamesByCategory.get(name) ?? []),
       ].entries()) {
-        const subcategory = await this.prisma.subcategory.upsert({
-          where: { slug: this.slug(subcategoryName) },
-          update: { name: subcategoryName, isActive: true },
-          create: {
-            name: subcategoryName,
-            slug: this.slug(subcategoryName),
-          },
-        });
+        const subcategoryId = sharedSubcategoryMap.get(subcategoryName)!;
         await this.prisma.categorySubcategory.upsert({
           where: {
             categoryId_subcategoryId: {
               categoryId: category.id,
-              subcategoryId: subcategory.id,
+              subcategoryId,
             },
           },
           update: {},
           create: {
             categoryId: category.id,
-            subcategoryId: subcategory.id,
+            subcategoryId,
             sortOrder,
           },
         });
-        subcategoryMap.set(`${name}:${subcategoryName}`, subcategory.id);
+        subcategoryMap.set(`${name}:${subcategoryName}`, subcategoryId);
       }
     }
 
@@ -316,42 +320,40 @@ export class GboxImporterService {
     const values = [...names]
       .filter(Boolean)
       .map((name) => ({ name, slug: this.slug(name) }));
-    if (model === 'service') {
-      await this.prisma.service.createMany({
-        data: values,
-        skipDuplicates: true,
-      });
-      const rows = await this.prisma.service.findMany({
-        where: { slug: { in: values.map(({ slug }) => slug) } },
-      });
-      return new Map(
-        values.map(({ name, slug }) => [
-          name,
-          rows.find((row) => row.slug === slug)!.id,
-        ]),
-      );
+    const uniqueValues = [
+      ...new Map(values.map((value) => [value.slug, value])).values(),
+    ];
+    const idsBySlug = new Map<string, string>();
+    for (const value of uniqueValues) {
+      const existing =
+        model === 'service'
+          ? await this.prisma.service.findFirst({ where: { name: value.name } })
+          : model === 'team'
+            ? await this.prisma.team.findFirst({ where: { name: value.name } })
+            : await this.prisma.tag.findFirst({ where: { name: value.name } });
+      const row =
+        existing ??
+        (model === 'service'
+          ? await this.prisma.service.upsert({
+              where: { slug: value.slug },
+              update: { name: value.name },
+              create: value,
+            })
+          : model === 'team'
+            ? await this.prisma.team.upsert({
+                where: { slug: value.slug },
+                update: { name: value.name },
+                create: value,
+              })
+            : await this.prisma.tag.upsert({
+                where: { slug: value.slug },
+                update: { name: value.name },
+                create: value,
+              }));
+      idsBySlug.set(value.slug, row.id);
     }
-    if (model === 'team') {
-      await this.prisma.team.createMany({ data: values, skipDuplicates: true });
-      const rows = await this.prisma.team.findMany({
-        where: { slug: { in: values.map(({ slug }) => slug) } },
-      });
-      return new Map(
-        values.map(({ name, slug }) => [
-          name,
-          rows.find((row) => row.slug === slug)!.id,
-        ]),
-      );
-    }
-    await this.prisma.tag.createMany({ data: values, skipDuplicates: true });
-    const rows = await this.prisma.tag.findMany({
-      where: { slug: { in: values.map(({ slug }) => slug) } },
-    });
     return new Map(
-      values.map(({ name, slug }) => [
-        name,
-        rows.find((row) => row.slug === slug)!.id,
-      ]),
+      values.map(({ name, slug }) => [name, idsBySlug.get(slug)!]),
     );
   }
 

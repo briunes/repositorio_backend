@@ -179,10 +179,21 @@ export class RepoService {
 
   async details(type: string, code: string, locale = 'PT', requestedVersion?: string) {
     const channel = type.toUpperCase() === 'PUSH' ? 'BLIP' : type.toUpperCase();
+    // PostgREST embeds use a left join by default. Filtering through the
+    // relation (`channel: { key: channel }`) can therefore return an unrelated
+    // communication with a null `channel` embed. Resolve the channel first and
+    // filter by its scalar foreign key so the parent row is filtered correctly.
+    const repositoryChannel = await this.prisma.channel.findUnique({
+      where: { key: channel },
+    });
+    if (!repositoryChannel)
+      throw new HttpException(
+        { status: false, message: 'Communication not found.' },
+        404,
+      );
     const communication = await this.prisma.communication.findFirst({
-      where: { code, channel: { key: channel } },
+      where: { code, channelId: repositoryChannel.id },
       include: {
-        channel: true,
         versions: {
           orderBy: [{ effectiveAt: 'desc' }, { createdAt: 'desc' }],
           include: {
@@ -210,7 +221,7 @@ export class RepoService {
       status: true,
       data: {
         tipoSolicitado: type.toUpperCase(),
-        tipoRepositorio: communication.channel.key,
+        tipoRepositorio: repositoryChannel.key,
         codigo: communication.code,
         nome: communication.name,
         desc: communication.description ?? undefined,
@@ -824,21 +835,27 @@ export class RepoService {
   async updateCommunicationTaxonomy(
     type: string,
     code: string,
-    body: { categoryIds?: string[]; subcategoryId?: string },
+    body: { categoryIds?: string[]; subcategoryIds?: string[] },
     gboxUserId?: string,
   ) {
     const categoryIds = [...new Set(body.categoryIds ?? [])];
-    if (!categoryIds.length || !body.subcategoryId)
+    const subcategoryIds = [...new Set(body.subcategoryIds ?? [])];
+    if (!categoryIds.length || !subcategoryIds.length)
       throw new BadRequestException(
-        'A categoria e a subcategoria são obrigatórias.',
+        'É obrigatória pelo menos uma categoria e uma subcategoria.',
       );
     const channel = type.toUpperCase() === 'PUSH' ? 'BLIP' : type.toUpperCase();
-    const [communication, subcategory, actor] = await Promise.all([
+    const repositoryChannel = await this.prisma.channel.findUnique({
+      where: { key: channel },
+      select: { id: true },
+    });
+    if (!repositoryChannel)
+      throw new NotFoundException('Comunicação não encontrada.');
+    const [communication, assignments, actor] = await Promise.all([
       this.prisma.communication.findFirst({
-        where: { code, channel: { key: channel } },
+        where: { code, channelId: repositoryChannel.id },
         select: {
           id: true,
-          channel: { select: { id: true } },
           subcategories: {
             select: {
               category: { select: { name: true } },
@@ -850,7 +867,7 @@ export class RepoService {
       this.prisma.categorySubcategory.findMany({
         where: {
           categoryId: { in: categoryIds },
-          subcategoryId: body.subcategoryId,
+          subcategoryId: { in: subcategoryIds },
           category: { isActive: true },
           subcategory: { isActive: true },
         },
@@ -868,16 +885,24 @@ export class RepoService {
     ]);
     if (!communication)
       throw new NotFoundException('Comunicação não encontrada.');
-    if (subcategory.length !== categoryIds.length)
+    const matchedCategoryIds = new Set(
+      assignments.map(({ category }) => category.id),
+    );
+    const matchedSubcategoryIds = new Set(
+      assignments.map(({ subcategory }) => subcategory.id),
+    );
+    if (
+      matchedCategoryIds.size !== categoryIds.length ||
+      matchedSubcategoryIds.size !== subcategoryIds.length
+    )
       throw new BadRequestException(
-        'A subcategoria não pertence a todas as categorias selecionadas.',
+        'Cada categoria e subcategoria selecionada deve formar pelo menos uma combinação válida.',
       );
 
-    const assignments = categoryIds.map((categoryId) =>
-      subcategory.find(({ category }) => category.id === categoryId),
-    ).filter((assignment): assignment is NonNullable<typeof assignment> => Boolean(assignment));
-    const categoryNames = assignments.map(({ category }) => category.name);
-    const selectedSubcategory = assignments[0].subcategory;
+    const categoryNames = [...new Set(assignments.map(({ category }) => category.name))];
+    const subcategoryNames = [
+      ...new Set(assignments.map(({ subcategory }) => subcategory.name)),
+    ];
 
     const previous = communication.subcategories.map(
       ({ category, subcategory: item }) => ({
@@ -885,12 +910,12 @@ export class RepoService {
         subcategory: item.name,
       }),
     );
-    await this.prisma.communicationSubcategory.deleteMany({
-      where: { communicationId: communication.id },
-    });
     await this.prisma.$transaction([
+      this.prisma.communicationSubcategory.deleteMany({
+        where: { communicationId: communication.id },
+      }),
       ...assignments.map((assignment) => this.prisma.communicationSubcategory.create({
-        data: { communicationId: communication.id, categoryId: assignment.category.id, subcategoryId: selectedSubcategory.id },
+        data: { communicationId: communication.id, categoryId: assignment.category.id, subcategoryId: assignment.subcategory.id },
       })),
       this.prisma.auditLog.create({
         data: {
@@ -902,7 +927,7 @@ export class RepoService {
             operation: 'taxonomy',
             previous,
             categories: categoryNames,
-            subcategory: selectedSubcategory.name,
+            subcategories: subcategoryNames,
           }),
         },
       }),
@@ -910,7 +935,7 @@ export class RepoService {
         UPDATE repository_snapshots
         SET payload = jsonb_set(
           jsonb_set(payload, ARRAY[${channel}, ${code}, 'categoria']::text[], ${JSON.stringify(categoryNames)}::jsonb, true),
-          ARRAY[${channel}, ${code}, 'subcategoria']::text[], ${JSON.stringify([selectedSubcategory.name])}::jsonb, true
+          ARRAY[${channel}, ${code}, 'subcategoria']::text[], ${JSON.stringify(subcategoryNames)}::jsonb, true
         ), synced_at = NOW()
         WHERE key = 'gbox-templates'
       `,
@@ -920,7 +945,7 @@ export class RepoService {
       status: true,
       data: {
         categories: categoryNames,
-        subcategory: selectedSubcategory.name,
+        subcategories: subcategoryNames,
       },
     };
   }
@@ -943,7 +968,7 @@ export class RepoService {
         401,
       );
     const activeRun = await this.prisma.syncRun.findFirst({
-      where: { source: 'GBOX', status: 'RUNNING' },
+      where: { status: 'RUNNING', source: { in: ['GBOX', 'GBOX_DETAILS'] } },
       select: { id: true, startedAt: true },
     });
     if (activeRun) {
@@ -1054,6 +1079,38 @@ export class RepoService {
       });
       throw error;
     }
+  }
+
+  async syncRows(authorization?: string) {
+    if (!authorization)
+      throw new HttpException(
+        { status: false, message: 'Authorization is required.' },
+        401,
+      );
+    const activeRun = await this.prisma.syncRun.findFirst({
+      where: { status: 'RUNNING', source: { in: ['GBOX', 'GBOX_DETAILS'] } },
+      select: { id: true, startedAt: true },
+    });
+    if (activeRun)
+      throw new ConflictException({
+        status: false,
+        message: 'Já existe uma sincronização GBox em curso.',
+        data: activeRun,
+      });
+
+    const payload = await this.request('/repo/', {
+      headers: { Authorization: authorization },
+    });
+    await this.saveSnapshot('gbox-repo-original', payload);
+    const templates = this.unwrapTemplates(payload);
+    const run = await this.importer.import(templates);
+    const completed = await this.prisma.syncRun.update({
+      where: { id: run.id },
+      data: { status: 'SUCCEEDED', completedAt: new Date() },
+    });
+    this.cacheTemplates(templates);
+    this.invalidateFiltersCache();
+    return { status: true, data: completed };
   }
 
   async syncDetails(authorization?: string) {
