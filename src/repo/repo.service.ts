@@ -64,19 +64,35 @@ export class RepoService {
     });
   }
 
-  async templates(authorization?: string) {
+  async templates(
+    authorization?: string,
+    activity: 'all' | 'active' | 'inactive' = 'all',
+  ) {
+    if (!['all', 'active', 'inactive'].includes(activity)) {
+      throw new BadRequestException('Invalid communication activity filter.');
+    }
+
     if (
       this.templatesCache?.expiresAt &&
       this.templatesCache.expiresAt > Date.now()
     ) {
-      return { status: true, data: this.templatesCache.data };
+      return {
+        status: true,
+        data: this.filterTemplatesByActivity(
+          this.templatesCache.data,
+          activity,
+        ),
+      };
     }
 
     if (authorization) {
       try {
         this.templatesRefresh ??= this.refreshTemplatesFromBo(authorization);
         const data = await this.templatesRefresh;
-        return { status: true, data };
+        return {
+          status: true,
+          data: this.filterTemplatesByActivity(data, activity),
+        };
       } catch (error) {
         if (this.isAuthenticationError(error)) throw error;
         // A temporary BO outage must not take down reads when a local snapshot
@@ -93,7 +109,10 @@ export class RepoService {
     if (snapshot && this.isObject(snapshot.payload)) {
       const data = snapshot.payload as GboxTemplates;
       this.cacheTemplates(data);
-      return { status: true, data };
+      return {
+        status: true,
+        data: this.filterTemplatesByActivity(data, activity),
+      };
     }
 
     // One-time compatibility fallback for databases created before the
@@ -176,10 +195,18 @@ export class RepoService {
       },
     });
     this.cacheTemplates(data);
-    return { status: true, data };
+    return {
+      status: true,
+      data: this.filterTemplatesByActivity(data, activity),
+    };
   }
 
-  async details(type: string, code: string, locale = 'PT', requestedVersion?: string) {
+  async details(
+    type: string,
+    code: string,
+    locale = 'PT',
+    requestedVersion?: string,
+  ) {
     const channel = type.toUpperCase() === 'PUSH' ? 'BLIP' : type.toUpperCase();
     // PostgREST embeds use a left join by default. Filtering through the
     // relation (`channel: { key: channel }`) can therefore return an unrelated
@@ -211,7 +238,9 @@ export class RepoService {
         404,
       );
     const version = requestedVersion
-      ? communication.versions.find(({ version: value }) => value === requestedVersion)
+      ? communication.versions.find(
+          ({ version: value }) => value === requestedVersion,
+        )
       : communication.versions[0];
     if (requestedVersion && !version)
       throw new NotFoundException('Versão da comunicação não encontrada.');
@@ -859,40 +888,109 @@ export class RepoService {
 
   private async requireCommentAuthor(gboxUserId?: string) {
     if (!gboxUserId)
-      throw new UnauthorizedException('É necessário iniciar sessão para comentar.');
+      throw new UnauthorizedException(
+        'É necessário iniciar sessão para comentar.',
+      );
     const author = await this.prisma.user.findUnique({
       where: { gboxUserId },
       select: { id: true },
     });
-    if (!author)
-      throw new UnauthorizedException('Utilizador não encontrado.');
+    if (!author) throw new UnauthorizedException('Utilizador não encontrado.');
     return author;
   }
 
   private commentContent(content?: string) {
     const value = content?.trim();
-    if (!value) throw new BadRequestException('O comentário não pode estar vazio.');
+    if (!value)
+      throw new BadRequestException('O comentário não pode estar vazio.');
     if (value.length > 2000)
-      throw new BadRequestException('O comentário não pode exceder 2000 caracteres.');
+      throw new BadRequestException(
+        'O comentário não pode exceder 2000 caracteres.',
+      );
     return value;
   }
 
-  async communicationComments(type: string, code: string) {
+  async communicationComments(
+    type: string,
+    code: string,
+    query: {
+      page?: string;
+      pageSize?: string;
+      authorId?: string;
+      dateFrom?: string;
+      dateTo?: string;
+    } = {},
+  ) {
     const communication = await this.resolveCommunication(type, code);
-    const data = await this.prisma.communicationComment.findMany({
-      where: { communicationId: communication.id },
-      orderBy: { createdAt: 'desc' },
-      select: {
-        id: true,
-        content: true,
-        createdAt: true,
-        updatedAt: true,
-        author: {
-          select: { id: true, displayName: true, username: true, gboxUserId: true },
+    const parsedPage = Number.parseInt(query.page ?? '1', 10);
+    const parsedPageSize = Number.parseInt(query.pageSize ?? '5', 10);
+    const page = Number.isFinite(parsedPage) ? Math.max(1, parsedPage) : 1;
+    const pageSize = Number.isFinite(parsedPageSize)
+      ? Math.min(50, Math.max(1, parsedPageSize))
+      : 5;
+    const parseDate = (value: string | undefined, endOfDay = false) => {
+      if (!value) return undefined;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value))
+        throw new BadRequestException('A data indicada não é válida.');
+      const date = new Date(`${value}T00:00:00.000Z`);
+      if (Number.isNaN(date.getTime()))
+        throw new BadRequestException('A data indicada não é válida.');
+      if (endOfDay) date.setUTCDate(date.getUTCDate() + 1);
+      return date;
+    };
+    const dateFrom = parseDate(query.dateFrom);
+    const dateToExclusive = parseDate(query.dateTo, true);
+    if (dateFrom && dateToExclusive && dateFrom >= dateToExclusive)
+      throw new BadRequestException(
+        'A data inicial não pode ser posterior à data final.',
+      );
+
+    const where: Prisma.CommunicationCommentWhereInput = {
+      communicationId: communication.id,
+      ...(query.authorId ? { authorId: query.authorId } : {}),
+      ...(dateFrom || dateToExclusive
+        ? {
+            createdAt: {
+              ...(dateFrom ? { gte: dateFrom } : {}),
+              ...(dateToExclusive ? { lt: dateToExclusive } : {}),
+            },
+          }
+        : {}),
+    };
+    const commentSelect = {
+      id: true,
+      content: true,
+      createdAt: true,
+      updatedAt: true,
+      author: {
+        select: {
+          id: true,
+          displayName: true,
+          username: true,
+          gboxUserId: true,
         },
       },
-    });
-    return { status: true, data };
+    } satisfies Prisma.CommunicationCommentSelect;
+    const [items, total] = await Promise.all([
+      this.prisma.communicationComment.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        select: commentSelect,
+      }),
+      this.prisma.communicationComment.count({ where }),
+    ]);
+    return {
+      status: true,
+      data: {
+        items,
+        total,
+        page,
+        pageSize,
+        totalPages: Math.max(1, Math.ceil(total / pageSize)),
+      },
+    };
   }
 
   async createCommunicationComment(
@@ -914,7 +1012,12 @@ export class RepoService {
         createdAt: true,
         updatedAt: true,
         author: {
-          select: { id: true, displayName: true, username: true, gboxUserId: true },
+          select: {
+            id: true,
+            displayName: true,
+            username: true,
+            gboxUserId: true,
+          },
         },
       },
     });
@@ -949,7 +1052,12 @@ export class RepoService {
         createdAt: true,
         updatedAt: true,
         author: {
-          select: { id: true, displayName: true, username: true, gboxUserId: true },
+          select: {
+            id: true,
+            displayName: true,
+            username: true,
+            gboxUserId: true,
+          },
         },
       },
     });
@@ -1044,7 +1152,9 @@ export class RepoService {
         'Cada categoria e subcategoria selecionada deve formar pelo menos uma combinação válida.',
       );
 
-    const categoryNames = [...new Set(assignments.map(({ category }) => category.name))];
+    const categoryNames = [
+      ...new Set(assignments.map(({ category }) => category.name)),
+    ];
     const subcategoryNames = [
       ...new Set(assignments.map(({ subcategory }) => subcategory.name)),
     ];
@@ -1547,6 +1657,30 @@ export class RepoService {
 
   private cacheTemplates(data: GboxTemplates) {
     this.templatesCache = { data, expiresAt: Date.now() + 30_000 };
+  }
+
+  private filterTemplatesByActivity(
+    templates: GboxTemplates,
+    activity: 'all' | 'active' | 'inactive',
+  ): GboxTemplates {
+    if (activity === 'all') return templates;
+
+    const filtered: GboxTemplates = {};
+    for (const [channel, channelTemplates] of Object.entries(templates)) {
+      if (!channelTemplates || Array.isArray(channelTemplates)) {
+        filtered[channel] = channelTemplates;
+        continue;
+      }
+
+      filtered[channel] = Object.fromEntries(
+        Object.entries(channelTemplates).filter(([, template]) => {
+          const isActive = Object.keys(template.versoes ?? {}).length > 0;
+          return activity === 'active' ? isActive : !isActive;
+        }),
+      );
+    }
+
+    return filtered;
   }
 
   private invalidateTemplatesCache() {
