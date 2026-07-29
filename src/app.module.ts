@@ -7,8 +7,10 @@ import { SupabaseModule } from './supabase/supabase.module';
 import { RepoModule } from './repo/repo.module';
 import { VersionModule } from './version/version.module';
 import { AdminModule } from './admin/admin.module';
-import { APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { RequestTimingInterceptor } from './database/request-timing.interceptor';
+import { AppAuthGuard } from './auth/app-auth.guard';
+import { AppTokenService } from './auth/app-token.service';
 
 @Module({
   imports: [
@@ -22,6 +24,8 @@ import { RequestTimingInterceptor } from './database/request-timing.interceptor'
   controllers: [AppController],
   providers: [
     AppService,
+    AppTokenService,
+    { provide: APP_GUARD, useClass: AppAuthGuard },
     { provide: APP_INTERCEPTOR, useClass: RequestTimingInterceptor },
   ],
 })

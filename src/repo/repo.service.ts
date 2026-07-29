@@ -16,6 +16,7 @@ import { GboxImporterService } from '../sync/gbox-importer.service';
 import { GboxTemplateDetail, GboxTemplates } from '../sync/gbox.types';
 import { GboxDetailSyncService } from '../sync/gbox-detail-sync.service';
 import { SupabaseService } from '../supabase/supabase.service';
+import { AppTokenService } from '../auth/app-token.service';
 import {
   markRequestCache,
   recordSupabaseCall,
@@ -32,7 +33,6 @@ export class RepoService {
   private readonly baseUrl?: string;
   private templatesCache?: { data: GboxTemplates; expiresAt: number };
   private filtersCache?: { data: JsonObject; expiresAt: number };
-  private templatesRefresh?: Promise<GboxTemplates>;
   private taxonomyCache?: { data: TaxonomyData; expiresAt: number };
   private taxonomyRefresh?: Promise<{ data: TaxonomyData; generation: number }>;
   private taxonomyGeneration = 0;
@@ -43,6 +43,7 @@ export class RepoService {
     private readonly importer: GboxImporterService,
     private readonly detailSync: GboxDetailSyncService,
     private readonly supabase: SupabaseService,
+    private readonly appTokens: AppTokenService,
   ) {
     this.baseUrl = config.get<string>('GBOX_API_BASE_URL')?.replace(/\/$/, '');
   }
@@ -53,21 +54,10 @@ export class RepoService {
       body: JSON.stringify(body),
     });
     const appRole = await this.syncLoggedInUser(response);
-    return this.withAppRole(response, appRole);
+    return this.withAppSession(response, appRole);
   }
 
-  refresh(body: JsonObject, authorization?: string) {
-    return this.request('/repo/refresh', {
-      method: 'POST',
-      headers: authorization ? { Authorization: authorization } : undefined,
-      body: JSON.stringify(body),
-    });
-  }
-
-  async templates(
-    authorization?: string,
-    activity: 'all' | 'active' | 'inactive' = 'all',
-  ) {
+  async templates(activity: 'all' | 'active' | 'inactive' = 'all') {
     if (!['all', 'active', 'inactive'].includes(activity)) {
       throw new BadRequestException('Invalid communication activity filter.');
     }
@@ -83,23 +73,6 @@ export class RepoService {
           activity,
         ),
       };
-    }
-
-    if (authorization) {
-      try {
-        this.templatesRefresh ??= this.refreshTemplatesFromBo(authorization);
-        const data = await this.templatesRefresh;
-        return {
-          status: true,
-          data: this.filterTemplatesByActivity(data, activity),
-        };
-      } catch (error) {
-        if (this.isAuthenticationError(error)) throw error;
-        // A temporary BO outage must not take down reads when a local snapshot
-        // is available. Authentication failures are intentionally not masked.
-      } finally {
-        this.templatesRefresh = undefined;
-      }
     }
 
     const snapshot = await this.prisma.repositorySnapshot.findUnique({
@@ -610,12 +583,17 @@ export class RepoService {
     userId?: string,
   ) {
     if (kind === 'subcategory') {
-      const current = await this.prisma.subcategory.findFirst({
-        where: { id, isActive: true },
-        select: { name: true, _count: { select: { communications: true } } },
-      });
+      const [current, communicationCount] = await Promise.all([
+        this.prisma.subcategory.findFirst({
+          where: { id, isActive: true },
+          select: { id: true, name: true },
+        }),
+        this.prisma.communicationSubcategory.count({
+          where: { subcategoryId: id },
+        }),
+      ]);
       if (!current) throw new NotFoundException('Subcategoria não encontrada.');
-      if (current._count.communications)
+      if (communicationCount)
         throw new ConflictException(
           'Esta subcategoria está associada a comunicações e não pode ser eliminada.',
         );
@@ -1604,19 +1582,26 @@ export class RepoService {
     return undefined;
   }
 
-  private withAppRole(payload: unknown, appRole?: string) {
+  private withAppSession(payload: unknown, appRole?: string) {
     if (
-      !appRole ||
       !this.isObject(payload) ||
       !this.isObject(payload.data) ||
       !this.isObject(payload.data.user)
     )
       return payload;
+    const gboxToken = this.firstString(payload.data.token);
+    const userId = payload.data.user.id ?? payload.data.user.iUserId;
+    const username = this.firstString(payload.data.user.username);
+    if (!gboxToken || (typeof userId !== 'string' && typeof userId !== 'number') || !username)
+      throw new BadGatewayException('GBox returned an invalid login payload.');
     return {
       ...payload,
       data: {
         ...payload.data,
-        user: { ...payload.data.user, role: appRole },
+        token: this.appTokens.issue(userId, username),
+        gboxToken,
+        expiresIn: 8 * 60 * 60,
+        user: { ...payload.data.user, ...(appRole ? { role: appRole } : {}) },
       },
     };
   }
@@ -1691,19 +1676,6 @@ export class RepoService {
     this.filtersCache = undefined;
     this.taxonomyCache = undefined;
     this.taxonomyGeneration += 1;
-  }
-
-  private async refreshTemplatesFromBo(authorization: string) {
-    const payload = await this.request('/repo/', {
-      headers: { Authorization: authorization },
-    });
-    const data = this.unwrapTemplates(payload);
-    await Promise.all([
-      this.saveSnapshot('gbox-repo-original', payload),
-      this.saveSnapshot('gbox-templates', data),
-    ]);
-    this.cacheTemplates(data);
-    return data;
   }
 
   private async saveSnapshot(key: string, payload: unknown) {

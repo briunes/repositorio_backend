@@ -1,7 +1,9 @@
 import { Controller, Get, Header } from '@nestjs/common';
 import { VersionService } from './version.service';
+import { Public } from '../auth/public.decorator';
 
 @Controller('version')
+@Public()
 export class VersionController {
   constructor(private readonly versions: VersionService) {}
 
