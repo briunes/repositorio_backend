@@ -67,8 +67,11 @@ export class RepoController {
 
   @Get('taxonomy/history')
   @Header('Cache-Control', 'no-store')
-  taxonomyHistory() {
-    return this.repo.taxonomyHistory();
+  taxonomyHistory(
+    @Query('entityType') entityType?: 'category' | 'subcategory',
+    @Query('entityId') entityId?: string,
+  ) {
+    return this.repo.taxonomyHistory(entityType, entityId);
   }
 
   @Post('taxonomy')
@@ -142,6 +145,45 @@ export class RepoController {
     @Headers('x-repo-user-id') userId?: string,
   ) {
     return this.repo.updateCommunicationTaxonomy(type, code, body, userId);
+  }
+
+  @Get(':type/:code/comments')
+  communicationComments(
+    @Param('type') type: string,
+    @Param('code') code: string,
+  ) {
+    return this.repo.communicationComments(type, code);
+  }
+
+  @Post(':type/:code/comments')
+  createCommunicationComment(
+    @Param('type') type: string,
+    @Param('code') code: string,
+    @Body() body: { content?: string },
+    @Headers('x-repo-user-id') userId?: string,
+  ) {
+    return this.repo.createCommunicationComment(type, code, body, userId);
+  }
+
+  @Patch(':type/:code/comments/:commentId')
+  updateCommunicationComment(
+    @Param('type') type: string,
+    @Param('code') code: string,
+    @Param('commentId') commentId: string,
+    @Body() body: { content?: string },
+    @Headers('x-repo-user-id') userId?: string,
+  ) {
+    return this.repo.updateCommunicationComment(type, code, commentId, body, userId);
+  }
+
+  @Delete(':type/:code/comments/:commentId')
+  deleteCommunicationComment(
+    @Param('type') type: string,
+    @Param('code') code: string,
+    @Param('commentId') commentId: string,
+    @Headers('x-repo-user-id') userId?: string,
+  ) {
+    return this.repo.deleteCommunicationComment(type, code, commentId, userId);
   }
 
   @Get('details')
