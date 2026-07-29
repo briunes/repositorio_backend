@@ -18,6 +18,7 @@ async function bootstrap() {
       'Pragma',
       'X-Repositorio-App-Version',
       'X-Repo-User-Id',
+      'X-GBox-Authorization',
     ],
   });
   await app.listen(process.env.PORT ?? 3000);

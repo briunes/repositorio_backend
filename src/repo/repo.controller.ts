@@ -11,48 +11,41 @@ import {
   Query,
 } from '@nestjs/common';
 import { RepoService } from './repo.service';
+import { Public } from '../auth/public.decorator';
 
 @Controller('repo')
 export class RepoController {
   constructor(private readonly repo: RepoService) {}
 
   @Post('login')
+  @Public()
   login(@Body() body: Record<string, unknown>) {
     return this.repo.login(body);
-  }
-
-  @Post('refresh')
-  refresh(
-    @Body() body: Record<string, unknown>,
-    @Headers('authorization') authorization?: string,
-  ) {
-    return this.repo.refresh(body, authorization);
   }
 
   @Get()
   @Header('Cache-Control', 'no-store')
   templates(
-    @Headers('authorization') authorization?: string,
     @Query('activity') activity?: 'all' | 'active' | 'inactive',
   ) {
-    return this.repo.templates(authorization, activity);
+    return this.repo.templates(activity);
   }
 
   @Post('sync')
   sync(
-    @Headers('authorization') authorization?: string,
+    @Headers('x-gbox-authorization') authorization?: string,
     @Body() body?: { userId?: string | number },
   ) {
     return this.repo.sync(authorization, body?.userId);
   }
 
   @Post('sync/details')
-  syncDetails(@Headers('authorization') authorization?: string) {
+  syncDetails(@Headers('x-gbox-authorization') authorization?: string) {
     return this.repo.syncDetails(authorization);
   }
 
   @Post('sync/rows')
-  syncRows(@Headers('authorization') authorization?: string) {
+  syncRows(@Headers('x-gbox-authorization') authorization?: string) {
     return this.repo.syncRows(authorization);
   }
 
