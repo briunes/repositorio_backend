@@ -63,6 +63,7 @@ model User {
   favourites      Favourite[]
   createdVersions CommunicationVersion[] @relation("VersionCreator")
   auditLogs       AuditLog[]
+  comments        CommunicationComment[]
 
   @@index([status])
   @@map("users")
@@ -229,6 +230,7 @@ model Communication {
   teams          CommunicationTeam[]
   tags           CommunicationTag[]
   favourites     Favourite[]
+  comments       CommunicationComment[]
 
   @@unique([channelId, code])
   @@unique([sourceSystem, sourceId])
@@ -378,6 +380,21 @@ model Favourite {
   @@id([userId, communicationId])
   @@index([communicationId])
   @@map("favourites")
+}
+
+model CommunicationComment {
+  id              String        @id @default(cuid())
+  communicationId String        @map("communication_id")
+  authorId        String        @map("author_id")
+  content         String        @db.Text
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+  communication   Communication @relation(fields: [communicationId], references: [id], onDelete: Cascade)
+  author          User          @relation(fields: [authorId], references: [id], onDelete: Restrict)
+
+  @@index([communicationId, createdAt])
+  @@index([authorId, createdAt])
+  @@map("communication_comments")
 }
 
 model AuditLog {

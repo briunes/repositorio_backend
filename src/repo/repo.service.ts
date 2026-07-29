@@ -2,9 +2,11 @@ import {
   BadRequestException,
   BadGatewayException,
   ConflictException,
+  ForbiddenException,
   HttpException,
   Injectable,
   NotFoundException,
+  UnauthorizedException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -352,9 +354,15 @@ export class RepoService {
     return data as TaxonomyData;
   }
 
-  async taxonomyHistory() {
+  async taxonomyHistory(
+    entityType?: 'category' | 'subcategory',
+    entityId?: string,
+  ) {
     const data = await this.prisma.auditLog.findMany({
-      where: { entityType: { in: ['category', 'subcategory'] } },
+      where: {
+        entityType: entityType ?? { in: ['category', 'subcategory'] },
+        ...(entityId ? { entityId } : {}),
+      },
       take: 100,
       orderBy: { createdAt: 'desc' },
       select: {
@@ -832,6 +840,143 @@ export class RepoService {
     });
   }
 
+  private async resolveCommunication(type: string, code: string) {
+    const channel = type.toUpperCase() === 'PUSH' ? 'BLIP' : type.toUpperCase();
+    const repositoryChannel = await this.prisma.channel.findUnique({
+      where: { key: channel },
+      select: { id: true },
+    });
+    if (!repositoryChannel)
+      throw new NotFoundException('Comunicação não encontrada.');
+    const communication = await this.prisma.communication.findFirst({
+      where: { code, channelId: repositoryChannel.id },
+      select: { id: true },
+    });
+    if (!communication)
+      throw new NotFoundException('Comunicação não encontrada.');
+    return communication;
+  }
+
+  private async requireCommentAuthor(gboxUserId?: string) {
+    if (!gboxUserId)
+      throw new UnauthorizedException('É necessário iniciar sessão para comentar.');
+    const author = await this.prisma.user.findUnique({
+      where: { gboxUserId },
+      select: { id: true },
+    });
+    if (!author)
+      throw new UnauthorizedException('Utilizador não encontrado.');
+    return author;
+  }
+
+  private commentContent(content?: string) {
+    const value = content?.trim();
+    if (!value) throw new BadRequestException('O comentário não pode estar vazio.');
+    if (value.length > 2000)
+      throw new BadRequestException('O comentário não pode exceder 2000 caracteres.');
+    return value;
+  }
+
+  async communicationComments(type: string, code: string) {
+    const communication = await this.resolveCommunication(type, code);
+    const data = await this.prisma.communicationComment.findMany({
+      where: { communicationId: communication.id },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        content: true,
+        createdAt: true,
+        updatedAt: true,
+        author: {
+          select: { id: true, displayName: true, username: true, gboxUserId: true },
+        },
+      },
+    });
+    return { status: true, data };
+  }
+
+  async createCommunicationComment(
+    type: string,
+    code: string,
+    body: { content?: string },
+    gboxUserId?: string,
+  ) {
+    const content = this.commentContent(body.content);
+    const [communication, author] = await Promise.all([
+      this.resolveCommunication(type, code),
+      this.requireCommentAuthor(gboxUserId),
+    ]);
+    const data = await this.prisma.communicationComment.create({
+      data: { communicationId: communication.id, authorId: author.id, content },
+      select: {
+        id: true,
+        content: true,
+        createdAt: true,
+        updatedAt: true,
+        author: {
+          select: { id: true, displayName: true, username: true, gboxUserId: true },
+        },
+      },
+    });
+    return { status: true, data };
+  }
+
+  async updateCommunicationComment(
+    type: string,
+    code: string,
+    commentId: string,
+    body: { content?: string },
+    gboxUserId?: string,
+  ) {
+    const content = this.commentContent(body.content);
+    const [communication, author] = await Promise.all([
+      this.resolveCommunication(type, code),
+      this.requireCommentAuthor(gboxUserId),
+    ]);
+    const current = await this.prisma.communicationComment.findFirst({
+      where: { id: commentId, communicationId: communication.id },
+      select: { authorId: true },
+    });
+    if (!current) throw new NotFoundException('Comentário não encontrado.');
+    if (current.authorId !== author.id)
+      throw new ForbiddenException('Só pode editar os seus comentários.');
+    const data = await this.prisma.communicationComment.update({
+      where: { id: commentId },
+      data: { content },
+      select: {
+        id: true,
+        content: true,
+        createdAt: true,
+        updatedAt: true,
+        author: {
+          select: { id: true, displayName: true, username: true, gboxUserId: true },
+        },
+      },
+    });
+    return { status: true, data };
+  }
+
+  async deleteCommunicationComment(
+    type: string,
+    code: string,
+    commentId: string,
+    gboxUserId?: string,
+  ) {
+    const [communication, author] = await Promise.all([
+      this.resolveCommunication(type, code),
+      this.requireCommentAuthor(gboxUserId),
+    ]);
+    const current = await this.prisma.communicationComment.findFirst({
+      where: { id: commentId, communicationId: communication.id },
+      select: { authorId: true },
+    });
+    if (!current) throw new NotFoundException('Comentário não encontrado.');
+    if (current.authorId !== author.id)
+      throw new ForbiddenException('Só pode eliminar os seus comentários.');
+    await this.prisma.communicationComment.delete({ where: { id: commentId } });
+    return { status: true, data: { id: commentId } };
+  }
+
   async updateCommunicationTaxonomy(
     type: string,
     code: string,
@@ -910,36 +1055,42 @@ export class RepoService {
         subcategory: item.name,
       }),
     );
-    await this.prisma.$transaction([
-      this.prisma.communicationSubcategory.deleteMany({
-        where: { communicationId: communication.id },
-      }),
-      ...assignments.map((assignment) => this.prisma.communicationSubcategory.create({
-        data: { communicationId: communication.id, categoryId: assignment.category.id, subcategoryId: assignment.subcategory.id },
+    // Supabase Data API operations are HTTP requests. Passing already-started
+    // promises to `$transaction` runs the delete and inserts concurrently, so
+    // an unchanged assignment can be inserted before its old row is removed.
+    await this.prisma.communicationSubcategory.deleteMany({
+      where: { communicationId: communication.id },
+    });
+    await this.prisma.communicationSubcategory.createMany({
+      data: assignments.map((assignment) => ({
+        communicationId: communication.id,
+        categoryId: assignment.category.id,
+        subcategoryId: assignment.subcategory.id,
       })),
-      this.prisma.auditLog.create({
-        data: {
-          actorId: actor?.id,
-          action: 'UPDATE',
-          entityType: 'communication',
-          entityId: communication.id,
-          changes: this.toJson({
-            operation: 'taxonomy',
-            previous,
-            categories: categoryNames,
-            subcategories: subcategoryNames,
-          }),
-        },
-      }),
-      this.prisma.$executeRaw`
-        UPDATE repository_snapshots
-        SET payload = jsonb_set(
-          jsonb_set(payload, ARRAY[${channel}, ${code}, 'categoria']::text[], ${JSON.stringify(categoryNames)}::jsonb, true),
-          ARRAY[${channel}, ${code}, 'subcategoria']::text[], ${JSON.stringify(subcategoryNames)}::jsonb, true
-        ), synced_at = NOW()
-        WHERE key = 'gbox-templates'
-      `,
-    ]);
+      skipDuplicates: true,
+    });
+    await this.prisma.auditLog.create({
+      data: {
+        actorId: actor?.id,
+        action: 'UPDATE',
+        entityType: 'communication',
+        entityId: communication.id,
+        changes: this.toJson({
+          operation: 'taxonomy',
+          previous,
+          categories: categoryNames,
+          subcategories: subcategoryNames,
+        }),
+      },
+    });
+    await this.prisma.$executeRaw`
+      UPDATE repository_snapshots
+      SET payload = jsonb_set(
+        jsonb_set(payload, ARRAY[${channel}, ${code}, 'categoria']::text[], ${JSON.stringify(categoryNames)}::jsonb, true),
+        ARRAY[${channel}, ${code}, 'subcategoria']::text[], ${JSON.stringify(subcategoryNames)}::jsonb, true
+      ), synced_at = NOW()
+      WHERE key = 'gbox-templates'
+    `;
     this.invalidateTemplatesCache();
     return {
       status: true,
