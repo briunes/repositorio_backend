@@ -31,8 +31,11 @@ export class RepoController {
 
   @Get()
   @Header('Cache-Control', 'no-store')
-  templates(@Headers('authorization') authorization?: string) {
-    return this.repo.templates(authorization);
+  templates(
+    @Headers('authorization') authorization?: string,
+    @Query('activity') activity?: 'all' | 'active' | 'inactive',
+  ) {
+    return this.repo.templates(authorization, activity);
   }
 
   @Post('sync')
@@ -151,8 +154,19 @@ export class RepoController {
   communicationComments(
     @Param('type') type: string,
     @Param('code') code: string,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+    @Query('authorId') authorId?: string,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
   ) {
-    return this.repo.communicationComments(type, code);
+    return this.repo.communicationComments(type, code, {
+      page,
+      pageSize,
+      authorId,
+      dateFrom,
+      dateTo,
+    });
   }
 
   @Post(':type/:code/comments')
@@ -173,7 +187,13 @@ export class RepoController {
     @Body() body: { content?: string },
     @Headers('x-repo-user-id') userId?: string,
   ) {
-    return this.repo.updateCommunicationComment(type, code, commentId, body, userId);
+    return this.repo.updateCommunicationComment(
+      type,
+      code,
+      commentId,
+      body,
+      userId,
+    );
   }
 
   @Delete(':type/:code/comments/:commentId')
@@ -192,7 +212,12 @@ export class RepoController {
     @Headers('authorization') authorization?: string,
   ) {
     void authorization;
-    return this.repo.details(query.tipo, query.codigo, query.lang, query.version);
+    return this.repo.details(
+      query.tipo,
+      query.codigo,
+      query.lang,
+      query.version,
+    );
   }
 
   @Get(':type/:code')
