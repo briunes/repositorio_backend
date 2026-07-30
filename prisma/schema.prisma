@@ -15,12 +15,10 @@ enum UserStatus {
 }
 
 enum CommunicationStatus {
-  DRAFT
+  ACTIVE
   PENDING
   SCHEDULED
-  AVAILABLE
-  ARCHIVED
-  UNAVAILABLE
+  INACTIVE
 }
 
 enum VersionStatus {
@@ -212,7 +210,7 @@ model Communication {
   code           String                     @db.VarChar(120)
   name           String                     @db.VarChar(255)
   description    String?                    @db.Text
-  status         CommunicationStatus        @default(DRAFT)
+  status         CommunicationStatus        @default(ACTIVE)
   channelId      String                     @map("channel_id")
   sourceSystem   String?                    @map("source_system") @db.VarChar(60)
   sourceId       String?                    @map("source_id") @db.VarChar(191)
