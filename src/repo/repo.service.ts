@@ -57,8 +57,10 @@ export class RepoService {
     return this.withAppSession(response, appRole);
   }
 
-  async templates(activity: 'all' | 'active' | 'inactive' = 'all') {
-    if (!['all', 'active', 'inactive'].includes(activity)) {
+  async templates(
+    activity: 'all' | 'active' | 'pending' | 'inactive' = 'all',
+  ) {
+    if (!['all', 'active', 'pending', 'inactive'].includes(activity)) {
       throw new BadRequestException('Invalid communication activity filter.');
     }
 
@@ -1592,7 +1594,11 @@ export class RepoService {
     const gboxToken = this.firstString(payload.data.token);
     const userId = payload.data.user.id ?? payload.data.user.iUserId;
     const username = this.firstString(payload.data.user.username);
-    if (!gboxToken || (typeof userId !== 'string' && typeof userId !== 'number') || !username)
+    if (
+      !gboxToken ||
+      (typeof userId !== 'string' && typeof userId !== 'number') ||
+      !username
+    )
       throw new BadGatewayException('GBox returned an invalid login payload.');
     return {
       ...payload,
@@ -1640,13 +1646,19 @@ export class RepoService {
     );
   }
 
+  private parseGboxDate(value?: string) {
+    if (!value) return null;
+    const date = new Date(value.replace(' ', 'T'));
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
   private cacheTemplates(data: GboxTemplates) {
     this.templatesCache = { data, expiresAt: Date.now() + 30_000 };
   }
 
   private filterTemplatesByActivity(
     templates: GboxTemplates,
-    activity: 'all' | 'active' | 'inactive',
+    activity: 'all' | 'active' | 'pending' | 'inactive',
   ): GboxTemplates {
     if (activity === 'all') return templates;
 
@@ -1659,8 +1671,16 @@ export class RepoService {
 
       filtered[channel] = Object.fromEntries(
         Object.entries(channelTemplates).filter(([, template]) => {
-          const isActive = Object.keys(template.versoes ?? {}).length > 0;
-          return activity === 'active' ? isActive : !isActive;
+          const versions = Object.values(template.versoes ?? {});
+          if (activity === 'inactive') return versions.length === 0;
+          if (versions.length === 0) return false;
+
+          const newestLaunch = versions
+            .map((version) => this.parseGboxDate(version.dataVersao))
+            .filter((date): date is Date => Boolean(date))
+            .sort((left, right) => right.getTime() - left.getTime())[0];
+          const isPending = Boolean(newestLaunch && newestLaunch > new Date());
+          return activity === 'pending' ? isPending : !isPending;
         }),
       );
     }

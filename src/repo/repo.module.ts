@@ -7,6 +7,11 @@ import { AppTokenService } from '../auth/app-token.service';
 
 @Module({
   controllers: [RepoController],
-  providers: [RepoService, GboxImporterService, GboxDetailSyncService, AppTokenService],
+  providers: [
+    RepoService,
+    GboxImporterService,
+    GboxDetailSyncService,
+    AppTokenService,
+  ],
 })
 export class RepoModule {}

@@ -1,4 +1,8 @@
-import { Injectable, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
+import {
+  Injectable,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
@@ -17,7 +21,9 @@ export class AppTokenService {
 
   constructor(config: ConfigService) {
     this.secret = config.get<string>('APP_TOKEN_SECRET');
-    this.lifetimeSeconds = Number(config.get('APP_TOKEN_TTL_SECONDS') ?? 8 * 60 * 60);
+    this.lifetimeSeconds = Number(
+      config.get('APP_TOKEN_TTL_SECONDS') ?? 8 * 60 * 60,
+    );
   }
 
   issue(userId: string | number, username: string) {
@@ -36,15 +42,25 @@ export class AppTokenService {
 
   verify(token: string): AppTokenClaims {
     const [header, payload, signature, extra] = token.split('.');
-    if (!header || !payload || !signature || extra) throw new UnauthorizedException('Invalid app token.');
+    if (!header || !payload || !signature || extra)
+      throw new UnauthorizedException('Invalid app token.');
     const expected = Buffer.from(this.sign(`${header}.${payload}`));
     const received = Buffer.from(signature);
-    if (expected.length !== received.length || !timingSafeEqual(expected, received)) {
+    if (
+      expected.length !== received.length ||
+      !timingSafeEqual(expected, received)
+    ) {
       throw new UnauthorizedException('Invalid app token.');
     }
     try {
-      const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as AppTokenClaims;
-      if (claims.iss !== 'repositorio-comunicacoes' || !claims.sub || claims.exp <= Math.floor(Date.now() / 1000)) {
+      const claims = JSON.parse(
+        Buffer.from(payload, 'base64url').toString('utf8'),
+      ) as AppTokenClaims;
+      if (
+        claims.iss !== 'repositorio-comunicacoes' ||
+        !claims.sub ||
+        claims.exp <= Math.floor(Date.now() / 1000)
+      ) {
         throw new Error('expired');
       }
       return claims;
@@ -59,7 +75,9 @@ export class AppTokenService {
 
   private sign(value: string) {
     if (!this.secret || this.secret.length < 32) {
-      throw new ServiceUnavailableException('APP_TOKEN_SECRET must contain at least 32 characters.');
+      throw new ServiceUnavailableException(
+        'APP_TOKEN_SECRET must contain at least 32 characters.',
+      );
     }
     return createHmac('sha256', this.secret).update(value).digest('base64url');
   }

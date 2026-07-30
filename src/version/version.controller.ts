@@ -10,6 +10,9 @@ export class VersionController {
   @Get()
   @Header('Cache-Control', 'no-store, no-cache, must-revalidate')
   async current() {
-    return { status: true, data: { version: await this.versions.currentFresh() } };
+    return {
+      status: true,
+      data: { version: await this.versions.currentFresh() },
+    };
   }
 }
