@@ -79,7 +79,7 @@ export class GboxImporterService {
           sourceSystem: 'GBOX',
           ...(sourceIds.length > 0 ? { sourceId: { notIn: sourceIds } } : {}),
         },
-        data: { status: 'UNAVAILABLE' },
+        data: { status: 'INACTIVE' },
       });
 
       await this.prisma.repositorySnapshot.upsert({
@@ -204,10 +204,10 @@ export class GboxImporterService {
       description: template.desc?.trim(),
       status:
         latestDate && latestDate > now
-          ? 'SCHEDULED'
+          ? 'PENDING'
           : versions.length
-            ? 'AVAILABLE'
-            : 'UNAVAILABLE',
+            ? 'ACTIVE'
+            : 'INACTIVE',
       sourceSystem: 'GBOX',
       sourceId: `${channel}:${code}`,
       templateFolder: template.templateFolder,

@@ -541,6 +541,32 @@ const relationQueryParams = (
   return params;
 };
 
+const relationFilterSelections = (
+  meta: ModelMeta,
+  where: JsonRecord = {},
+  selectedRelations: JsonRecord = {},
+): string[] => {
+  const entries: string[] = [];
+  for (const [field, value] of Object.entries(where)) {
+    if (['AND', 'OR', 'NOT'].includes(field)) continue;
+    const relation = meta.relations?.[field];
+    if (
+      !relation ||
+      relation.manual ||
+      selectedRelations[field] ||
+      !value ||
+      typeof value !== 'object' ||
+      Array.isArray(value)
+    ) {
+      continue;
+    }
+    entries.push(
+      `${field}:${relation.table}${relation.constraint ? `!${relation.constraint}` : ''}!inner(*)`,
+    );
+  }
+  return entries;
+};
+
 const POSTGREST_PAGE_SIZE = 1000;
 
 class SupabaseApi {
@@ -579,7 +605,7 @@ class SupabaseApi {
           ? ' Use an sb_secret_ key (or legacy service_role JWT) and apply the pending Prisma migrations to grant service_role access to the configured schema.'
           : '';
       const error = new Error(
-        `Supabase Data API ${response.status} ${response.statusText}: ${detail}${permissionHint}`,
+        `Supabase Data API ${response.status} ${response.statusText} for ${init.method ?? 'GET'} ${path}: ${detail || '<empty response body>'}${permissionHint}`,
       );
       if (detail.includes('23505')) {
         Object.assign(error, { code: 'P2002' });
@@ -625,8 +651,23 @@ class SupabaseApi {
     };
 
     const buildPath = (args: JsonRecord = {}, extra: string[] = []) => {
+      const selectedRelations = {
+        ...(args.select ?? {}),
+        ...(args.include ?? {}),
+      };
+      const selectedFields = selection(
+        modelName,
+        meta,
+        args.select,
+        args.include,
+      );
+      const filterRelations = relationFilterSelections(
+        meta,
+        args.where,
+        selectedRelations,
+      );
       const query = [
-        `select=${encodeURIComponent(selection(modelName, meta, args.select, args.include))}`,
+        `select=${encodeURIComponent([selectedFields, ...filterRelations].filter(Boolean).join(','))}`,
         ...whereToFilters(mapWhere(modelName, normalizeWhere(args.where))),
         ...relationQueryParams(modelName, meta, args.select, args.include),
         ...extra,

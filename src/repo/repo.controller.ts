@@ -26,7 +26,7 @@ export class RepoController {
   @Get()
   @Header('Cache-Control', 'no-store')
   templates(
-    @Query('activity') activity?: 'all' | 'active' | 'inactive',
+    @Query('activity') activity?: 'all' | 'active' | 'pending' | 'inactive',
   ) {
     return this.repo.templates(activity);
   }
