@@ -3,5 +3,7 @@ dist/
 coverage/
 .env
 .env.local
+.env.vercel-*
+!.env.vercel-*.example
 *.log
 .vercel
