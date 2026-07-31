@@ -988,17 +988,38 @@ class SupabaseApi {
       },
       createMany: async (args: JsonRecord) => {
         const rows = (Array.isArray(args.data) ? args.data : [args.data]).map(
-          (item) => prepareData(item, true).data,
+          (item) =>
+            Object.fromEntries(
+              Object.entries(prepareData(item, true).data).filter(
+                ([, value]) => value !== undefined,
+              ),
+            ),
         );
         if (!rows.length) return { count: 0 };
-        const result = await this.request(meta.table, {
-          method: 'POST',
-          headers: args.skipDuplicates
-            ? { Prefer: 'resolution=ignore-duplicates,return=representation' }
-            : undefined,
-          body: JSON.stringify(rows),
-        });
-        return { count: result?.length ?? 0 };
+
+        // PostgREST requires every object in a bulk insert to have exactly the
+        // same keys. Keep omitted fields omitted (so database defaults still
+        // apply) by sending each distinct object shape as its own request.
+        const rowsByShape = new Map<string, JsonRecord[]>();
+        for (const row of rows) {
+          const shape = Object.keys(row).sort().join('\u0000');
+          const groupedRows = rowsByShape.get(shape) ?? [];
+          groupedRows.push(row);
+          rowsByShape.set(shape, groupedRows);
+        }
+
+        let count = 0;
+        for (const groupedRows of rowsByShape.values()) {
+          const result = await this.request(meta.table, {
+            method: 'POST',
+            headers: args.skipDuplicates
+              ? { Prefer: 'resolution=ignore-duplicates,return=representation' }
+              : undefined,
+            body: JSON.stringify(groupedRows),
+          });
+          count += result?.length ?? 0;
+        }
+        return { count };
       },
       update: async (args: JsonRecord) =>
         enrichResult(
