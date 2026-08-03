@@ -26,13 +26,17 @@ export class AppTokenService {
     );
   }
 
-  issue(userId: string | number, username: string) {
+  issue(
+    userId: string | number,
+    username: string,
+    lifetimeSeconds = this.lifetimeSeconds,
+  ) {
     const now = Math.floor(Date.now() / 1000);
     const claims: AppTokenClaims = {
       sub: String(userId),
       username,
       iat: now,
-      exp: now + this.lifetimeSeconds,
+      exp: now + lifetimeSeconds,
       iss: 'repositorio-comunicacoes',
     };
     const header = this.encode({ alg: 'HS256', typ: 'JWT' });

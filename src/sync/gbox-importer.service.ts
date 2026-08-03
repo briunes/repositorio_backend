@@ -143,8 +143,9 @@ export class GboxImporterService {
       existing.has(`${channel}:${code}`),
     );
     for (let index = 0; index < present.length; index += 50) {
+      const batch = present.slice(index, index + 50);
       await this.prisma.$transaction(
-        present.slice(index, index + 50).map((entry) => {
+        batch.map((entry) => {
           const sourceId = `${entry.channel}:${entry.code}`;
           return this.prisma.communication.update({
             where: { id: existing.get(sourceId)!.id },
@@ -152,6 +153,28 @@ export class GboxImporterService {
           });
         }),
       );
+      const audits = batch.flatMap((entry) => {
+        const sourceId = `${entry.channel}:${entry.code}`;
+        const current = existing.get(sourceId);
+        const fields = current
+          ? this.communicationPropertyChanges(
+              current.metadata as GboxTemplate,
+              entry.template,
+            )
+          : {};
+        return Object.keys(fields).length
+          ? [
+              {
+                action: 'UPDATE' as const,
+                entityType: 'communication',
+                entityId: current!.id,
+                changes: this.json({ operation: 'properties', fields }),
+              },
+            ]
+          : [];
+      });
+      if (audits.length)
+        await this.prisma.auditLog.createMany({ data: audits });
     }
     const rows = await this.prisma.communication.findMany({
       where: { sourceSystem: 'GBOX', sourceId: { in: sourceIds } },
@@ -185,6 +208,33 @@ export class GboxImporterService {
         ];
       }),
     );
+  }
+
+  private communicationPropertyChanges(
+    previous: GboxTemplate,
+    current: GboxTemplate,
+  ) {
+    const fields: Record<
+      string,
+      { previous: string | string[]; current: string | string[] }
+    > = {};
+    const candidates = {
+      name: [previous.nome?.trim() || '', current.nome?.trim() || ''],
+      description: [previous.desc?.trim() || '', current.desc?.trim() || ''],
+      tags: [this.tags(previous.tags), this.tags(current.tags)],
+      services: [previous.servico ?? [], current.servico ?? []],
+      teams: [previous.equipa ?? [], current.equipa ?? []],
+      templateFolder: [
+        previous.templateFolder ?? '',
+        current.templateFolder ?? '',
+      ],
+    } satisfies Record<string, [string | string[], string | string[]]>;
+    for (const [field, [oldValue, newValue]] of Object.entries(candidates)) {
+      if (this.stableJson(oldValue) !== this.stableJson(newValue)) {
+        fields[field] = { previous: oldValue, current: newValue };
+      }
+    }
+    return fields;
   }
 
   private communicationData(

@@ -7,10 +7,13 @@ import {
   Patch,
   Post,
   Put,
+  UseGuards,
 } from '@nestjs/common';
 import { AdminService } from './admin.service';
+import { AdminAccessGuard } from './admin-access.guard';
 
 @Controller('admin')
+@UseGuards(AdminAccessGuard)
 export class AdminController {
   constructor(private readonly admin: AdminService) {}
 
@@ -76,5 +79,33 @@ export class AdminController {
   @Patch('settings/version')
   updateVersion(@Body() body: { version?: string }) {
     return this.admin.updateVersion(body.version);
+  }
+
+  @Patch('settings')
+  updateSettings(@Body() body: Record<string, unknown>) {
+    return this.admin.updateSettings(body);
+  }
+
+  @Get('changelog')
+  changelog() {
+    return this.admin.changelog();
+  }
+
+  @Post('changelog')
+  createRelease(@Body() body: Record<string, unknown>) {
+    return this.admin.createRelease(body);
+  }
+
+  @Patch('changelog/:id')
+  updateRelease(
+    @Param('id') id: string,
+    @Body() body: Record<string, unknown>,
+  ) {
+    return this.admin.updateRelease(id, body);
+  }
+
+  @Delete('changelog/:id')
+  deleteRelease(@Param('id') id: string) {
+    return this.admin.deleteRelease(id);
   }
 }

@@ -54,12 +54,158 @@ export class RepoService {
       body: JSON.stringify(body),
     });
     const appRole = await this.syncLoggedInUser(response);
-    return this.withAppSession(response, appRole);
+    const config = await this.prisma.systemConfig.findUnique({
+      where: { id: 'default' },
+      select: { sessionDurationMinutes: true },
+    });
+    return this.withAppSession(
+      response,
+      appRole,
+      (config?.sessionDurationMinutes ?? 480) * 60,
+    );
   }
 
-  async templates(
-    activity: 'all' | 'active' | 'pending' | 'inactive' = 'all',
+  async profile(gboxUserId?: string) {
+    if (!gboxUserId) throw new UnauthorizedException('User is required.');
+    const user = await this.prisma.user.findUnique({
+      where: { gboxUserId },
+      select: {
+        username: true,
+        displayName: true,
+        email: true,
+        avatarUrl: true,
+      },
+    });
+    if (!user) throw new NotFoundException('User profile was not found.');
+    return { status: true, data: user };
+  }
+
+  async updateProfile(
+    gboxUserId: string | undefined,
+    body: { name?: string; email?: string | null; avatarUrl?: string | null },
   ) {
+    if (!gboxUserId) throw new UnauthorizedException('User is required.');
+    const name = body.name?.trim();
+    if (!name) throw new BadRequestException('Name is required.');
+    if (name.length > 160) throw new BadRequestException('Name is too long.');
+    const email = body.email?.trim() || null;
+    if (
+      email &&
+      (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+    ) {
+      throw new BadRequestException('Email is invalid.');
+    }
+    const avatarUrl = body.avatarUrl?.trim() || null;
+    if (
+      avatarUrl &&
+      (!/^data:image\/(?:jpeg|png|webp);base64,/.test(avatarUrl) ||
+        avatarUrl.length > 1_500_000)
+    ) {
+      throw new BadRequestException('Profile picture is invalid or too large.');
+    }
+    try {
+      const user = await this.prisma.user.update({
+        where: { gboxUserId },
+        data: { displayName: name, email, avatarUrl },
+        select: {
+          username: true,
+          displayName: true,
+          email: true,
+          avatarUrl: true,
+        },
+      });
+      return { status: true, data: user };
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        throw new ConflictException(
+          'Email is already being used by another user.',
+        );
+      }
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2025'
+      ) {
+        throw new NotFoundException('User profile was not found.');
+      }
+      throw error;
+    }
+  }
+
+  async preferences(gboxUserId?: string) {
+    if (!gboxUserId) throw new UnauthorizedException('User is required.');
+    const preferences = await this.prisma.user.findUnique({
+      where: { gboxUserId },
+      select: {
+        theme: true,
+        tableDensity: true,
+        language: true,
+        dateFormat: true,
+        timeZone: true,
+      },
+    });
+    if (!preferences)
+      throw new NotFoundException('User preferences were not found.');
+    return { status: true, data: preferences };
+  }
+
+  async updatePreferences(
+    gboxUserId: string | undefined,
+    body: {
+      theme?: string;
+      tableDensity?: string;
+      language?: string;
+      dateFormat?: string;
+      timeZone?: string;
+    },
+  ) {
+    if (!gboxUserId) throw new UnauthorizedException('User is required.');
+    if (!['light', 'dark', 'system'].includes(body.theme ?? ''))
+      throw new BadRequestException('Theme is invalid.');
+    if (!['comfortable', 'compact'].includes(body.tableDensity ?? ''))
+      throw new BadRequestException('Table density is invalid.');
+    if (body.language !== 'pt-PT')
+      throw new BadRequestException('Language is invalid.');
+    if (!['dd/MM/yyyy', 'yyyy-MM-dd'].includes(body.dateFormat ?? ''))
+      throw new BadRequestException('Date format is invalid.');
+    if (
+      !['Europe/Lisbon', 'UTC', 'Atlantic/Azores'].includes(body.timeZone ?? '')
+    )
+      throw new BadRequestException('Time zone is invalid.');
+
+    try {
+      const preferences = await this.prisma.user.update({
+        where: { gboxUserId },
+        data: {
+          theme: body.theme,
+          tableDensity: body.tableDensity,
+          language: body.language,
+          dateFormat: body.dateFormat,
+          timeZone: body.timeZone,
+        },
+        select: {
+          theme: true,
+          tableDensity: true,
+          language: true,
+          dateFormat: true,
+          timeZone: true,
+        },
+      });
+      return { status: true, data: preferences };
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2025'
+      ) {
+        throw new NotFoundException('User preferences were not found.');
+      }
+      throw error;
+    }
+  }
+
+  async templates(activity: 'all' | 'active' | 'pending' | 'inactive' = 'all') {
     if (!['all', 'active', 'pending', 'inactive'].includes(activity)) {
       throw new BadRequestException('Invalid communication activity filter.');
     }
@@ -176,6 +322,46 @@ export class RepoService {
     };
   }
 
+  async changelog() {
+    const data = await this.prisma.releaseNote.findMany({
+      where: { published: true },
+      orderBy: [{ publishedAt: 'desc' }, { createdAt: 'desc' }],
+      select: {
+        id: true,
+        version: true,
+        title: true,
+        summary: true,
+        heroImageUrl: true,
+        blocks: true,
+        published: true,
+        publishedAt: true,
+      },
+    });
+    return { status: true, data };
+  }
+
+  async config() {
+    const data = await this.prisma.systemConfig.upsert({
+      where: { id: 'default' },
+      update: {},
+      create: { id: 'default', appVersion: '1.0.0' },
+      select: {
+        defaultView: true,
+        defaultPageSize: true,
+        defaultSort: true,
+        showInactive: true,
+        sessionDurationMinutes: true,
+        idleTimeoutMinutes: true,
+        maintenanceMode: true,
+        readOnlyMode: true,
+        fullSmsEditingEnabled: true,
+        maintenanceMessage: true,
+        environmentName: true,
+      },
+    });
+    return { status: true, data };
+  }
+
   async details(
     type: string,
     code: string,
@@ -280,13 +466,14 @@ export class RepoService {
       SELECT json_build_object(
         'categories', COALESCE((
           SELECT json_agg(json_build_object(
-            'id', id, 'name', name, 'slug', slug
+            'id', id, 'name', name, 'slug', slug, 'sortOrder', sort_order
           ) ORDER BY sort_order ASC, name ASC)
           FROM categories WHERE is_active = true
         ), '[]'::json),
         'subcategories', COALESCE((
           SELECT json_agg(json_build_object(
-            'id', s.id, 'name', s.name, 'slug', s.slug, 'description', s.description, 'parentId', cs.category_id
+            'id', s.id, 'name', s.name, 'slug', s.slug, 'description', s.description,
+            'parentId', cs.category_id, 'sortOrder', cs.sort_order
           ) ORDER BY cs.sort_order ASC, s.name ASC)
           FROM category_subcategories cs
           JOIN subcategories s ON s.id = cs.subcategory_id
@@ -361,12 +548,114 @@ export class RepoService {
   async taxonomyHistory(
     entityType?: 'category' | 'subcategory',
     entityId?: string,
+    query: {
+      page?: string;
+      pageSize?: string;
+      authorId?: string;
+      action?: 'CREATE' | 'UPDATE' | 'DELETE';
+      dateFrom?: string;
+      dateTo?: string;
+    } = {},
   ) {
-    const data = await this.prisma.auditLog.findMany({
-      where: {
-        entityType: entityType ?? { in: ['category', 'subcategory'] },
-        ...(entityId ? { entityId } : {}),
+    const parsedPage = Number.parseInt(query.page ?? '1', 10);
+    const parsedPageSize = Number.parseInt(query.pageSize ?? '8', 10);
+    const page = Number.isFinite(parsedPage) ? Math.max(1, parsedPage) : 1;
+    const pageSize = Number.isFinite(parsedPageSize)
+      ? Math.min(50, Math.max(1, parsedPageSize))
+      : 8;
+    const parseDate = (value: string | undefined, endExclusive = false) => {
+      if (!value) return undefined;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value))
+        throw new BadRequestException('A data indicada não é válida.');
+      const date = new Date(`${value}T00:00:00.000Z`);
+      if (Number.isNaN(date.getTime()))
+        throw new BadRequestException('A data indicada não é válida.');
+      if (endExclusive) date.setUTCDate(date.getUTCDate() + 1);
+      return date;
+    };
+    const dateFrom = parseDate(query.dateFrom);
+    const dateTo = parseDate(query.dateTo, true);
+    if (dateFrom && dateTo && dateFrom >= dateTo)
+      throw new BadRequestException(
+        'A data inicial não pode ser posterior à data final.',
+      );
+    const taxonomyWhere = {
+      entityType: entityType ?? { in: ['category', 'subcategory'] },
+      ...(entityId ? { entityId } : {}),
+    } satisfies Prisma.AuditLogWhereInput;
+    const where = {
+      ...taxonomyWhere,
+      ...(query.authorId ? { actorId: query.authorId } : {}),
+      ...(query.action ? { action: query.action } : {}),
+      ...(dateFrom || dateTo
+        ? {
+            createdAt: {
+              ...(dateFrom ? { gte: dateFrom } : {}),
+              ...(dateTo ? { lt: dateTo } : {}),
+            },
+          }
+        : {}),
+    } satisfies Prisma.AuditLogWhereInput;
+    const select = {
+      id: true,
+      action: true,
+      entityType: true,
+      entityId: true,
+      changes: true,
+      createdAt: true,
+      actor: {
+        select: { id: true, displayName: true, username: true, avatarUrl: true },
       },
+    } satisfies Prisma.AuditLogSelect;
+    const [items, total, authorRows] = await Promise.all([
+      this.prisma.auditLog.findMany({
+        where,
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        orderBy: { createdAt: 'desc' },
+        select,
+      }),
+      this.prisma.auditLog.count({ where }),
+      this.prisma.auditLog.findMany({
+        where: taxonomyWhere,
+        take: 1000,
+        orderBy: { createdAt: 'desc' },
+        select: {
+          actor: {
+            select: { id: true, displayName: true, username: true, avatarUrl: true },
+          },
+        },
+      }),
+    ]);
+    const authors = [
+      ...new Map(
+        authorRows
+          .filter(({ actor }) => Boolean(actor))
+          .map(({ actor }) => [actor!.id, actor!]),
+      ).values(),
+    ].sort((left, right) =>
+      (left.displayName || left.username).localeCompare(
+        right.displayName || right.username,
+        'pt-PT',
+      ),
+    );
+    return {
+      status: true,
+      data: {
+        items,
+        authors,
+        total,
+        page,
+        pageSize,
+        totalPages: Math.max(1, Math.ceil(total / pageSize)),
+      },
+    };
+  }
+
+  async communicationHistory(type: string, code: string) {
+    const communication = await this.resolveCommunication(type, code);
+    const data = await this.prisma.auditLog.findMany({
+      where: { entityType: 'communication', entityId: communication.id },
       take: 100,
       orderBy: { createdAt: 'desc' },
       select: {
@@ -376,7 +665,7 @@ export class RepoService {
         entityId: true,
         changes: true,
         createdAt: true,
-        actor: { select: { displayName: true, username: true } },
+        actor: { select: { displayName: true, username: true, avatarUrl: true } },
       },
     });
     return { status: true, data };
@@ -890,6 +1179,36 @@ export class RepoService {
     return value;
   }
 
+  private normalizeCommunicationValues(
+    values: string[] | undefined,
+    field: 'tags' | 'services' | 'teams',
+    maxLength: number,
+  ) {
+    if (values === undefined) return undefined;
+    const normalized = [
+      ...new Set(
+        values
+          .map((value) => value?.trim())
+          .filter((value): value is string => Boolean(value)),
+      ),
+    ];
+    if (normalized.some((value) => value.length > maxLength)) {
+      throw new BadRequestException(
+        `O campo ${field} contém valores demasiado longos.`,
+      );
+    }
+    return normalized;
+  }
+
+  private sameStringValues(left: string[], right: string[]) {
+    const normalizedLeft = [...new Set(left)].sort();
+    const normalizedRight = [...new Set(right)].sort();
+    return (
+      normalizedLeft.length === normalizedRight.length &&
+      normalizedLeft.every((value, index) => value === normalizedRight[index])
+    );
+  }
+
   async communicationComments(
     type: string,
     code: string,
@@ -947,6 +1266,7 @@ export class RepoService {
           id: true,
           displayName: true,
           username: true,
+          avatarUrl: true,
           gboxUserId: true,
         },
       },
@@ -996,6 +1316,7 @@ export class RepoService {
             id: true,
             displayName: true,
             username: true,
+            avatarUrl: true,
             gboxUserId: true,
           },
         },
@@ -1036,6 +1357,7 @@ export class RepoService {
             id: true,
             displayName: true,
             username: true,
+            avatarUrl: true,
             gboxUserId: true,
           },
         },
@@ -1063,6 +1385,393 @@ export class RepoService {
       throw new ForbiddenException('Só pode eliminar os seus comentários.');
     await this.prisma.communicationComment.delete({ where: { id: commentId } });
     return { status: true, data: { id: commentId } };
+  }
+
+  async updateCommunicationProperties(
+    type: string,
+    code: string,
+    body: {
+      name?: string | null;
+      description?: string | null;
+      tags?: string[];
+      services?: string[];
+      teams?: string[];
+    },
+    gboxUserId?: string,
+  ) {
+    const channel = type.toUpperCase() === 'PUSH' ? 'BLIP' : type.toUpperCase();
+    if (channel !== 'SMS') {
+      throw new BadRequestException(
+        'A edição avançada está disponível apenas para comunicações SMS.',
+      );
+    }
+    await this.assertFullSmsEditingEnabled();
+
+    const name =
+      body.name === undefined ? undefined : body.name?.trim() || null;
+    if (name !== undefined && !name)
+      throw new BadRequestException(
+        'O nome da comunicação não pode estar vazio.',
+      );
+    if ((name?.length ?? 0) > 255)
+      throw new BadRequestException('O nome da comunicação é demasiado longo.');
+
+    const description =
+      body.description === undefined
+        ? undefined
+        : body.description?.trim() || null;
+    if ((description?.length ?? 0) > 4000)
+      throw new BadRequestException(
+        'As observações não podem exceder 4000 caracteres.',
+      );
+
+    const tags = this.normalizeCommunicationValues(body.tags, 'tags', 100);
+    const services = this.normalizeCommunicationValues(
+      body.services,
+      'services',
+      120,
+    );
+    const teams = this.normalizeCommunicationValues(body.teams, 'teams', 120);
+
+    const [communication, actor] = await Promise.all([
+      this.prisma.communication.findFirst({
+        where: {
+          code,
+          channel: { key: channel },
+        },
+        select: {
+          id: true,
+          name: true,
+          description: true,
+          tags: { include: { tag: { select: { name: true } } } },
+          services: {
+            include: { service: { select: { name: true } } },
+          },
+          teams: { include: { team: { select: { name: true } } } },
+        },
+      }),
+      gboxUserId
+        ? this.prisma.user.findUnique({
+            where: { gboxUserId },
+            select: { id: true },
+          })
+        : Promise.resolve(null),
+    ]);
+
+    if (!communication)
+      throw new NotFoundException('Comunicação não encontrada.');
+
+    const currentTags = [
+      ...new Set(communication.tags.map(({ tag }) => tag.name)),
+    ];
+    const currentServices = [
+      ...new Set(communication.services.map(({ service }) => service.name)),
+    ];
+    const currentTeams = [
+      ...new Set(communication.teams.map(({ team }) => team.name)),
+    ];
+
+    const nextDescription =
+      description === undefined ? communication.description : description;
+    const nextName = name === undefined ? communication.name : name;
+    const nextTags = tags ?? currentTags;
+    const nextServices = services ?? currentServices;
+    const nextTeams = teams ?? currentTeams;
+
+    const nameChanged = name !== undefined && nextName !== communication.name;
+    const descriptionChanged =
+      description !== undefined &&
+      nextDescription !== communication.description;
+    const tagsChanged =
+      tags !== undefined && !this.sameStringValues(currentTags, nextTags);
+    const servicesChanged =
+      services !== undefined &&
+      !this.sameStringValues(currentServices, nextServices);
+    const teamsChanged =
+      teams !== undefined && !this.sameStringValues(currentTeams, nextTeams);
+
+    if (
+      !nameChanged &&
+      !descriptionChanged &&
+      !tagsChanged &&
+      !servicesChanged &&
+      !teamsChanged
+    ) {
+      return {
+        status: true,
+        data: {
+          name: communication.name,
+          description: communication.description ?? '',
+          tags: currentTags,
+          services: currentServices,
+          teams: currentTeams,
+        },
+      };
+    }
+
+    if (nameChanged || descriptionChanged) {
+      await this.prisma.communication.update({
+        where: { id: communication.id },
+        data: {
+          ...(nameChanged ? { name: nextName! } : {}),
+          ...(descriptionChanged ? { description: nextDescription } : {}),
+        },
+      });
+    }
+
+    if (tagsChanged) {
+      const tagIds: string[] = [];
+      for (const name of nextTags) {
+        const slug = this.slug(name);
+        const existingTag = await this.prisma.tag.findFirst({
+          where: {
+            OR: [{ name }, { slug }],
+          },
+          select: { id: true },
+        });
+        const tag =
+          existingTag ??
+          (await this.prisma.tag.create({
+            data: { name, slug },
+            select: { id: true },
+          }));
+        tagIds.push(tag.id);
+      }
+
+      await this.prisma.communicationTag.deleteMany({
+        where: { communicationId: communication.id },
+      });
+      if (tagIds.length) {
+        await this.prisma.communicationTag.createMany({
+          data: tagIds.map((tagId) => ({
+            communicationId: communication.id,
+            tagId,
+          })),
+          skipDuplicates: true,
+        });
+      }
+    }
+
+    if (servicesChanged) {
+      const serviceIds: string[] = [];
+      for (const name of nextServices) {
+        const service = await this.prisma.service.upsert({
+          where: { name },
+          update: { isActive: true },
+          create: { name, slug: this.slug(name), isActive: true },
+          select: { id: true },
+        });
+        serviceIds.push(service.id);
+      }
+
+      await this.prisma.communicationService.deleteMany({
+        where: { communicationId: communication.id },
+      });
+      if (serviceIds.length) {
+        await this.prisma.communicationService.createMany({
+          data: serviceIds.map((serviceId) => ({
+            communicationId: communication.id,
+            serviceId,
+          })),
+          skipDuplicates: true,
+        });
+      }
+    }
+
+    if (teamsChanged) {
+      const teamIds: string[] = [];
+      for (const name of nextTeams) {
+        const team = await this.prisma.team.upsert({
+          where: { name },
+          update: { isActive: true },
+          create: { name, slug: this.slug(name), isActive: true },
+          select: { id: true },
+        });
+        teamIds.push(team.id);
+      }
+
+      await this.prisma.communicationTeam.deleteMany({
+        where: { communicationId: communication.id },
+      });
+      if (teamIds.length) {
+        await this.prisma.communicationTeam.createMany({
+          data: teamIds.map((teamId) => ({
+            communicationId: communication.id,
+            teamId,
+          })),
+          skipDuplicates: true,
+        });
+      }
+    }
+
+    const fields: Record<string, { previous: unknown; current: unknown }> = {};
+    if (nameChanged) {
+      fields.name = {
+        previous: communication.name,
+        current: nextName ?? '',
+      };
+    }
+    if (descriptionChanged) {
+      fields.description = {
+        previous: communication.description ?? '',
+        current: nextDescription ?? '',
+      };
+    }
+    if (tagsChanged) {
+      fields.tags = { previous: currentTags, current: nextTags };
+    }
+    if (servicesChanged) {
+      fields.services = { previous: currentServices, current: nextServices };
+    }
+    if (teamsChanged) {
+      fields.teams = { previous: currentTeams, current: nextTeams };
+    }
+
+    await this.prisma.auditLog.create({
+      data: {
+        actorId: actor?.id,
+        action: 'UPDATE',
+        entityType: 'communication',
+        entityId: communication.id,
+        changes: this.toJson({ operation: 'properties', fields }),
+      },
+    });
+
+    await this.updateTemplateSnapshotProperties(channel, code, {
+      name: nextName ?? communication.name,
+      description: nextDescription ?? '',
+      tags: nextTags,
+      services: nextServices,
+      teams: nextTeams,
+    });
+
+    this.invalidateTemplatesCache();
+    this.invalidateFiltersCache();
+    return {
+      status: true,
+      data: {
+        name: nextName ?? communication.name,
+        description: nextDescription ?? '',
+        tags: nextTags,
+        services: nextServices,
+        teams: nextTeams,
+      },
+    };
+  }
+
+  async updateCommunicationContent(
+    type: string,
+    code: string,
+    body: { version?: string; locale?: string; content?: string | null },
+    gboxUserId?: string,
+  ) {
+    const channel = type.toUpperCase() === 'PUSH' ? 'BLIP' : type.toUpperCase();
+    if (channel !== 'SMS') {
+      throw new BadRequestException(
+        'A edição avançada está disponível apenas para comunicações SMS.',
+      );
+    }
+    await this.assertFullSmsEditingEnabled();
+
+    const locale = (body.locale?.trim() || 'PT').toUpperCase();
+    if (!/^[A-Z]{2,10}$/.test(locale)) {
+      throw new BadRequestException('Idioma inválido.');
+    }
+
+    const content = body.content === null ? '' : (body.content ?? '');
+    if (content.length > 5000) {
+      throw new BadRequestException(
+        'O conteúdo SMS não pode exceder 5000 caracteres.',
+      );
+    }
+
+    const [communication, actor] = await Promise.all([
+      this.prisma.communication.findFirst({
+        where: { code, channel: { key: channel } },
+        select: {
+          id: true,
+          versions: {
+            orderBy: [{ effectiveAt: 'desc' }, { createdAt: 'desc' }],
+            select: {
+              id: true,
+              version: true,
+              localizations: {
+                select: { id: true, locale: true, content: true },
+              },
+            },
+          },
+        },
+      }),
+      gboxUserId
+        ? this.prisma.user.findUnique({
+            where: { gboxUserId },
+            select: { id: true },
+          })
+        : Promise.resolve(null),
+    ]);
+
+    if (!communication)
+      throw new NotFoundException('Comunicação não encontrada.');
+
+    const selectedVersion = body.version
+      ? communication.versions.find(({ version }) => version === body.version)
+      : communication.versions[0];
+    if (!selectedVersion)
+      throw new NotFoundException('Versão da comunicação não encontrada.');
+
+    const localization =
+      selectedVersion.localizations.find(
+        (item) => item.locale.toUpperCase() === locale,
+      ) ?? selectedVersion.localizations[0];
+    if (!localization)
+      throw new NotFoundException('Localização da comunicação não encontrada.');
+
+    const previous = localization.content ?? '';
+    if (previous === content) {
+      return {
+        status: true,
+        data: { version: selectedVersion.version, locale, content },
+      };
+    }
+
+    await this.prisma.communicationLocalization.update({
+      where: { id: localization.id },
+      data: { content },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        actorId: actor?.id,
+        action: 'UPDATE',
+        entityType: 'communication',
+        entityId: communication.id,
+        changes: this.toJson({
+          operation: 'content',
+          fields: {
+            content: {
+              previous,
+              current: content,
+              version: selectedVersion.version,
+              locale,
+            },
+          },
+        }),
+      },
+    });
+
+    await this.updateTemplateSnapshotContent(
+      channel,
+      code,
+      selectedVersion.version,
+      locale,
+      content,
+    );
+
+    this.invalidateTemplatesCache();
+    return {
+      status: true,
+      data: { version: selectedVersion.version, locale, content },
+    };
   }
 
   async updateCommunicationTaxonomy(
@@ -1545,7 +2254,7 @@ export class RepoService {
     const gboxUserId = String(rawId);
     const existing = await this.prisma.user.findFirst({
       where: { OR: [{ gboxUserId }, { username: rawUsername }] },
-      select: { id: true },
+      select: { id: true, displayName: true, email: true },
     });
     const values = {
       gboxUserId,
@@ -1557,7 +2266,15 @@ export class RepoService {
     const user = existing
       ? await this.prisma.user.update({
           where: { id: existing.id },
-          data: values,
+          data: {
+            gboxUserId,
+            username: rawUsername,
+            lastLoginAt: values.lastLoginAt,
+            ...(!existing.displayName && values.displayName
+              ? { displayName: values.displayName }
+              : {}),
+            ...(!existing.email && values.email ? { email: values.email } : {}),
+          },
         })
       : await this.prisma.user.create({ data: values });
     if (existing) {
@@ -1584,7 +2301,11 @@ export class RepoService {
     return undefined;
   }
 
-  private withAppSession(payload: unknown, appRole?: string) {
+  private withAppSession(
+    payload: unknown,
+    appRole?: string,
+    lifetimeSeconds = 8 * 60 * 60,
+  ) {
     if (
       !this.isObject(payload) ||
       !this.isObject(payload.data) ||
@@ -1604,9 +2325,9 @@ export class RepoService {
       ...payload,
       data: {
         ...payload.data,
-        token: this.appTokens.issue(userId, username),
+        token: this.appTokens.issue(userId, username, lifetimeSeconds),
         gboxToken,
-        expiresIn: 8 * 60 * 60,
+        expiresIn: lifetimeSeconds,
         user: { ...payload.data.user, ...(appRole ? { role: appRole } : {}) },
       },
     };
@@ -1692,6 +2413,18 @@ export class RepoService {
     this.templatesCache = undefined;
   }
 
+  private async assertFullSmsEditingEnabled() {
+    const config = await this.prisma.systemConfig.findUnique({
+      where: { id: 'default' },
+      select: { fullSmsEditingEnabled: true },
+    });
+    if (!config?.fullSmsEditingEnabled) {
+      throw new ForbiddenException(
+        'A edição completa de SMS está desativada. Apenas categoria e subcategoria podem ser alteradas.',
+      );
+    }
+  }
+
   private invalidateFiltersCache() {
     this.filtersCache = undefined;
     this.taxonomyCache = undefined;
@@ -1704,6 +2437,83 @@ export class RepoService {
       where: { key },
       update: { payload: this.toJson(payload), syncedAt },
       create: { key, payload: this.toJson(payload), syncedAt },
+    });
+  }
+
+  private async updateTemplateSnapshotProperties(
+    channel: string,
+    code: string,
+    values: {
+      name: string;
+      description: string;
+      tags: string[];
+      services: string[];
+      teams: string[];
+    },
+  ) {
+    const snapshot = await this.prisma.repositorySnapshot.findUnique({
+      where: { key: 'gbox-templates' },
+      select: { payload: true },
+    });
+    if (!snapshot || !this.isObject(snapshot.payload)) return;
+
+    const payload = JSON.parse(JSON.stringify(snapshot.payload)) as JsonObject;
+    const channelData = payload[channel];
+    if (!this.isObject(channelData)) return;
+    const communication = channelData[code];
+    if (!this.isObject(communication)) return;
+
+    communication.nome = values.name;
+    communication.desc = values.description;
+    communication.tags = values.tags;
+    communication.servico = values.services;
+    communication.equipa = values.teams;
+
+    await this.prisma.repositorySnapshot.update({
+      where: { key: 'gbox-templates' },
+      data: { payload: this.toJson(payload), syncedAt: new Date() },
+    });
+  }
+
+  private async updateTemplateSnapshotContent(
+    channel: string,
+    code: string,
+    version: string,
+    locale: string,
+    content: string,
+  ) {
+    const snapshot = await this.prisma.repositorySnapshot.findUnique({
+      where: { key: 'gbox-templates' },
+      select: { payload: true },
+    });
+    if (!snapshot || !this.isObject(snapshot.payload)) return;
+
+    const payload = JSON.parse(JSON.stringify(snapshot.payload)) as JsonObject;
+    const channelData = payload[channel];
+    if (!this.isObject(channelData)) return;
+    const communication = channelData[code];
+    if (!this.isObject(communication)) return;
+
+    const versions = this.isObject(communication.versoes)
+      ? (communication.versoes as JsonObject)
+      : {};
+    const versionValue = versions[version];
+    const versionEntry = this.isObject(versionValue)
+      ? (versionValue as JsonObject)
+      : {};
+    const localeValue = versionEntry[locale];
+    const localeEntry = this.isObject(localeValue)
+      ? (localeValue as JsonObject)
+      : {};
+
+    localeEntry.text = content;
+    versionEntry[locale] = localeEntry;
+    versions[version] = versionEntry;
+    communication.versoes = versions;
+
+    await this.prisma.repositorySnapshot.update({
+      where: { key: 'gbox-templates' },
+      data: { payload: this.toJson(payload), syncedAt: new Date() },
     });
   }
 
