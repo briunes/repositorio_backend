@@ -23,6 +23,50 @@ export class RepoController {
     return this.repo.login(body);
   }
 
+  @Get('profile')
+  profile(@Headers('x-repo-user-id') userId?: string) {
+    return this.repo.profile(userId);
+  }
+
+  @Patch('profile')
+  updateProfile(
+    @Headers('x-repo-user-id') userId: string | undefined,
+    @Body()
+    body: { name?: string; email?: string | null; avatarUrl?: string | null },
+  ) {
+    return this.repo.updateProfile(userId, body);
+  }
+
+  @Get('profile/preferences')
+  preferences(@Headers('x-repo-user-id') userId?: string) {
+    return this.repo.preferences(userId);
+  }
+
+  @Get('changelog')
+  changelog() {
+    return this.repo.changelog();
+  }
+
+  @Get('config')
+  config() {
+    return this.repo.config();
+  }
+
+  @Patch('profile/preferences')
+  updatePreferences(
+    @Headers('x-repo-user-id') userId: string | undefined,
+    @Body()
+    body: {
+      theme?: string;
+      tableDensity?: string;
+      language?: string;
+      dateFormat?: string;
+      timeZone?: string;
+    },
+  ) {
+    return this.repo.updatePreferences(userId, body);
+  }
+
   @Get()
   @Header('Cache-Control', 'no-store')
   templates(
@@ -66,8 +110,21 @@ export class RepoController {
   taxonomyHistory(
     @Query('entityType') entityType?: 'category' | 'subcategory',
     @Query('entityId') entityId?: string,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+    @Query('authorId') authorId?: string,
+    @Query('action') action?: 'CREATE' | 'UPDATE' | 'DELETE',
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
   ) {
-    return this.repo.taxonomyHistory(entityType, entityId);
+    return this.repo.taxonomyHistory(entityType, entityId, {
+      page,
+      pageSize,
+      authorId,
+      action,
+      dateFrom,
+      dateTo,
+    });
   }
 
   @Post('taxonomy')
@@ -141,6 +198,42 @@ export class RepoController {
     @Headers('x-repo-user-id') userId?: string,
   ) {
     return this.repo.updateCommunicationTaxonomy(type, code, body, userId);
+  }
+
+  @Patch(':type/:code/properties')
+  updateCommunicationProperties(
+    @Param('type') type: string,
+    @Param('code') code: string,
+    @Body()
+    body: {
+      name?: string | null;
+      description?: string | null;
+      tags?: string[];
+      services?: string[];
+      teams?: string[];
+    },
+    @Headers('x-repo-user-id') userId?: string,
+  ) {
+    return this.repo.updateCommunicationProperties(type, code, body, userId);
+  }
+
+  @Patch(':type/:code/content')
+  updateCommunicationContent(
+    @Param('type') type: string,
+    @Param('code') code: string,
+    @Body()
+    body: { version?: string; locale?: string; content?: string | null },
+    @Headers('x-repo-user-id') userId?: string,
+  ) {
+    return this.repo.updateCommunicationContent(type, code, body, userId);
+  }
+
+  @Get(':type/:code/history')
+  communicationHistory(
+    @Param('type') type: string,
+    @Param('code') code: string,
+  ) {
+    return this.repo.communicationHistory(type, code);
   }
 
   @Get(':type/:code/comments')

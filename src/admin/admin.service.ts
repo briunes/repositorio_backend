@@ -7,6 +7,12 @@ import {
 import { PrismaService } from '../database/prisma.service';
 import { VersionService } from '../version/version.service';
 
+type ReleaseBlock = {
+  title: string;
+  description: string;
+  imageUrl?: string;
+};
+
 @Injectable()
 export class AdminService {
   constructor(
@@ -21,6 +27,7 @@ export class AdminService {
         id: true,
         username: true,
         displayName: true,
+        avatarUrl: true,
         email: true,
         status: true,
         lastLoginAt: true,
@@ -174,7 +181,7 @@ export class AdminService {
       where: { id: 'default' },
       update: {},
       create: { id: 'default', appVersion: '1.0.0' },
-      select: { appVersion: true, updatedAt: true },
+      select: this.settingsSelection(),
     });
     return { status: true, data };
   }
@@ -192,10 +199,193 @@ export class AdminService {
       where: { id: 'default' },
       update: { appVersion: normalized },
       create: { id: 'default', appVersion: normalized },
-      select: { appVersion: true, updatedAt: true },
+      select: this.settingsSelection(),
     });
     this.versions.invalidate();
     return { status: true, data };
+  }
+
+  async updateSettings(body: Record<string, unknown>) {
+    const defaultView = this.oneOf(
+      body.defaultView,
+      ['all', 'email', 'sms', 'letter', 'push'],
+      'Vista predefinida',
+    );
+    const defaultSort = this.oneOf(
+      body.defaultSort,
+      ['name-asc', 'name-desc', 'date-desc', 'date-asc'],
+      'Ordenação predefinida',
+    );
+    const defaultPageSize = this.integer(
+      body.defaultPageSize,
+      12,
+      200,
+      'Registos por página',
+    );
+    const sessionDurationMinutes = this.integer(
+      body.sessionDurationMinutes,
+      15,
+      1440,
+      'Duração da sessão',
+    );
+    const idleTimeoutMinutes = this.integer(
+      body.idleTimeoutMinutes,
+      5,
+      sessionDurationMinutes,
+      'Tempo de inatividade',
+    );
+    const environmentName = this.text(body.environmentName, 80, 'Ambiente');
+    const maintenanceMessage =
+      typeof body.maintenanceMessage === 'string'
+        ? body.maintenanceMessage.trim().slice(0, 500) || null
+        : null;
+    const data = await this.prisma.systemConfig.upsert({
+      where: { id: 'default' },
+      update: {
+        defaultView,
+        defaultSort,
+        defaultPageSize,
+        showInactive: Boolean(body.showInactive),
+        sessionDurationMinutes,
+        idleTimeoutMinutes,
+        maintenanceMode: Boolean(body.maintenanceMode),
+        readOnlyMode: Boolean(body.readOnlyMode),
+        fullSmsEditingEnabled: Boolean(body.fullSmsEditingEnabled),
+        maintenanceMessage,
+        environmentName,
+      },
+      create: {
+        id: 'default',
+        appVersion: '1.0.0',
+        defaultView,
+        defaultSort,
+        defaultPageSize,
+        showInactive: Boolean(body.showInactive),
+        sessionDurationMinutes,
+        idleTimeoutMinutes,
+        maintenanceMode: Boolean(body.maintenanceMode),
+        readOnlyMode: Boolean(body.readOnlyMode),
+        fullSmsEditingEnabled: Boolean(body.fullSmsEditingEnabled),
+        maintenanceMessage,
+        environmentName,
+      },
+      select: this.settingsSelection(),
+    });
+    return { status: true, data };
+  }
+
+  async changelog() {
+    const data = await this.prisma.releaseNote.findMany({
+      orderBy: [{ publishedAt: 'desc' }, { createdAt: 'desc' }],
+    });
+    return { status: true, data };
+  }
+
+  async createRelease(body: Record<string, unknown>) {
+    const input = this.releaseInput(body);
+    const data = await this.prisma.releaseNote.create({
+      data: { ...input, publishedAt: input.published ? new Date() : null },
+    });
+    return { status: true, data };
+  }
+
+  async updateRelease(id: string, body: Record<string, unknown>) {
+    const input = this.releaseInput(body);
+    const existing = await this.prisma.releaseNote.findUnique({
+      where: { id },
+      select: { publishedAt: true },
+    });
+    if (!existing) throw new NotFoundException('Novidade não encontrada.');
+    const data = await this.prisma.releaseNote.update({
+      where: { id },
+      data: {
+        ...input,
+        publishedAt: input.published
+          ? (existing.publishedAt ?? new Date())
+          : null,
+      },
+    });
+    return { status: true, data };
+  }
+
+  async deleteRelease(id: string) {
+    await this.prisma.releaseNote.delete({ where: { id } });
+    return { status: true, data: { id } };
+  }
+
+  private settingsSelection() {
+    return {
+      appVersion: true,
+      defaultView: true,
+      defaultPageSize: true,
+      defaultSort: true,
+      showInactive: true,
+      sessionDurationMinutes: true,
+      idleTimeoutMinutes: true,
+      maintenanceMode: true,
+      readOnlyMode: true,
+      fullSmsEditingEnabled: true,
+      maintenanceMessage: true,
+      environmentName: true,
+      updatedAt: true,
+    } as const;
+  }
+
+  private releaseInput(body: Record<string, unknown>) {
+    const version = this.text(body.version, 40, 'Versão');
+    if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version))
+      throw new BadRequestException('Indique uma versão válida.');
+    const rawBlocks = Array.isArray(body.blocks) ? body.blocks : [];
+    const blocks: ReleaseBlock[] = rawBlocks.map((value) => {
+      if (!value || typeof value !== 'object')
+        throw new BadRequestException('Conteúdo da novidade inválido.');
+      const block = value as Record<string, unknown>;
+      return {
+        title: this.text(block.title, 160, 'Título da funcionalidade'),
+        description: this.text(
+          block.description,
+          1000,
+          'Descrição da funcionalidade',
+        ),
+        ...(typeof block.imageUrl === 'string' && block.imageUrl.trim()
+          ? { imageUrl: block.imageUrl.trim().slice(0, 2000) }
+          : {}),
+      };
+    });
+    if (!blocks.length)
+      throw new BadRequestException('Adicione pelo menos uma funcionalidade.');
+    return {
+      version,
+      title: this.text(body.title, 180, 'Título'),
+      summary: this.text(body.summary, 600, 'Resumo'),
+      heroImageUrl:
+        typeof body.heroImageUrl === 'string'
+          ? body.heroImageUrl.trim().slice(0, 2000) || null
+          : null,
+      blocks,
+      published: Boolean(body.published),
+    };
+  }
+
+  private text(value: unknown, max: number, label: string) {
+    if (typeof value !== 'string' || !value.trim())
+      throw new BadRequestException(`${label} é obrigatório.`);
+    return value.trim().slice(0, max);
+  }
+
+  private integer(value: unknown, min: number, max: number, label: string) {
+    const number = Number(value);
+    if (!Number.isInteger(number) || number < min || number > max)
+      throw new BadRequestException(
+        `${label} deve estar entre ${min} e ${max}.`,
+      );
+    return number;
+  }
+
+  private oneOf(value: unknown, allowed: string[], label: string) {
+    if (typeof value !== 'string' || !allowed.includes(value))
+      throw new BadRequestException(`${label} é inválida.`);
+    return value;
   }
 
   private async assertPermissionsExist(

@@ -1,0 +1,6 @@
+ALTER TABLE "users"
+ADD COLUMN "theme" VARCHAR(20) NOT NULL DEFAULT 'light',
+ADD COLUMN "table_density" VARCHAR(20) NOT NULL DEFAULT 'comfortable',
+ADD COLUMN "language" VARCHAR(10) NOT NULL DEFAULT 'pt-PT',
+ADD COLUMN "date_format" VARCHAR(20) NOT NULL DEFAULT 'dd/MM/yyyy',
+ADD COLUMN "time_zone" VARCHAR(80) NOT NULL DEFAULT 'Europe/Lisbon';

@@ -53,6 +53,12 @@ model User {
   username        String                 @unique @db.VarChar(100)
   displayName     String?                @map("display_name") @db.VarChar(160)
   email           String?                @unique @db.VarChar(254)
+  avatarUrl       String?                @map("avatar_url") @db.Text
+  theme           String                 @default("light") @db.VarChar(20)
+  tableDensity    String                 @default("comfortable") @map("table_density") @db.VarChar(20)
+  language        String                 @default("pt-PT") @db.VarChar(10)
+  dateFormat      String                 @default("dd/MM/yyyy") @map("date_format") @db.VarChar(20)
+  timeZone        String                 @default("Europe/Lisbon") @map("time_zone") @db.VarChar(80)
   status          UserStatus             @default(ACTIVE)
   lastLoginAt     DateTime?              @map("last_login_at")
   createdAt       DateTime               @default(now()) @map("created_at")
@@ -413,9 +419,36 @@ model AuditLog {
 }
 
 model SystemConfig {
-  id         String   @id @default("default")
-  appVersion String   @default("1.0.0") @map("app_version") @db.VarChar(40)
-  updatedAt  DateTime @updatedAt @map("updated_at")
+  id                     String   @id @default("default")
+  appVersion             String   @default("1.0.0") @map("app_version") @db.VarChar(40)
+  defaultView            String   @default("all") @map("default_view") @db.VarChar(30)
+  defaultPageSize        Int      @default(48) @map("default_page_size")
+  defaultSort            String   @default("name-asc") @map("default_sort") @db.VarChar(40)
+  showInactive           Boolean  @default(true) @map("show_inactive")
+  sessionDurationMinutes Int      @default(480) @map("session_duration_minutes")
+  idleTimeoutMinutes     Int      @default(60) @map("idle_timeout_minutes")
+  maintenanceMode        Boolean  @default(false) @map("maintenance_mode")
+  readOnlyMode           Boolean  @default(false) @map("read_only_mode")
+  fullSmsEditingEnabled  Boolean  @default(false) @map("full_sms_editing_enabled")
+  maintenanceMessage     String?  @map("maintenance_message") @db.VarChar(500)
+  environmentName        String   @default("Produção") @map("environment_name") @db.VarChar(80)
+  updatedAt              DateTime @updatedAt @map("updated_at")
 
   @@map("system_config")
+}
+
+model ReleaseNote {
+  id          String   @id @default(cuid())
+  version     String   @unique @db.VarChar(40)
+  title       String   @db.VarChar(180)
+  summary     String   @db.VarChar(600)
+  heroImageUrl String? @map("hero_image_url") @db.Text
+  blocks      Json
+  published   Boolean  @default(false)
+  publishedAt DateTime? @map("published_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@index([published, publishedAt])
+  @@map("release_notes")
 }
