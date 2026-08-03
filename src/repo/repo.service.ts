@@ -70,6 +70,7 @@ export class RepoService {
     const user = await this.prisma.user.findUnique({
       where: { gboxUserId },
       select: {
+        id: true,
         username: true,
         displayName: true,
         email: true,
@@ -77,7 +78,26 @@ export class RepoService {
       },
     });
     if (!user) throw new NotFoundException('User profile was not found.');
-    return { status: true, data: user };
+    const adminRole = await this.prisma.role.findUnique({
+      where: { key: 'admin' },
+      select: { id: true },
+    });
+    const adminAssignment = adminRole
+      ? await this.prisma.userRole.findFirst({
+          where: { userId: user.id, roleId: adminRole.id },
+          select: { userId: true },
+        })
+      : null;
+    return {
+      status: true,
+      data: {
+        username: user.username,
+        displayName: user.displayName,
+        email: user.email,
+        avatarUrl: user.avatarUrl,
+        isAdmin: Boolean(adminAssignment),
+      },
+    };
   }
 
   async updateProfile(
@@ -652,23 +672,106 @@ export class RepoService {
     };
   }
 
-  async communicationHistory(type: string, code: string) {
+  async communicationHistory(
+    type: string,
+    code: string,
+    query: {
+      page?: string;
+      pageSize?: string;
+      authorId?: string;
+      action?: 'CREATE' | 'UPDATE' | 'DELETE';
+      dateFrom?: string;
+      dateTo?: string;
+    } = {},
+  ) {
     const communication = await this.resolveCommunication(type, code);
-    const data = await this.prisma.auditLog.findMany({
-      where: { entityType: 'communication', entityId: communication.id },
-      take: 100,
-      orderBy: { createdAt: 'desc' },
-      select: {
+    const parsedPage = Number.parseInt(query.page ?? '1', 10);
+    const parsedPageSize = Number.parseInt(query.pageSize ?? '8', 10);
+    const page = Number.isFinite(parsedPage) ? Math.max(1, parsedPage) : 1;
+    const pageSize = Number.isFinite(parsedPageSize)
+      ? Math.min(50, Math.max(1, parsedPageSize))
+      : 8;
+    const parseDate = (value: string | undefined, endExclusive = false) => {
+      if (!value) return undefined;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value))
+        throw new BadRequestException('A data indicada não é válida.');
+      const date = new Date(`${value}T00:00:00.000Z`);
+      if (Number.isNaN(date.getTime()))
+        throw new BadRequestException('A data indicada não é válida.');
+      if (endExclusive) date.setUTCDate(date.getUTCDate() + 1);
+      return date;
+    };
+    const dateFrom = parseDate(query.dateFrom);
+    const dateTo = parseDate(query.dateTo, true);
+    if (dateFrom && dateTo && dateFrom >= dateTo)
+      throw new BadRequestException(
+        'A data inicial não pode ser posterior à data final.',
+      );
+    const historyWhere = {
+      entityType: 'communication',
+      entityId: communication.id,
+    } satisfies Prisma.AuditLogWhereInput;
+    const where = {
+      ...historyWhere,
+      ...(query.authorId ? { actorId: query.authorId } : {}),
+      ...(query.action ? { action: query.action } : {}),
+      ...(dateFrom || dateTo
+        ? {
+            createdAt: {
+              ...(dateFrom ? { gte: dateFrom } : {}),
+              ...(dateTo ? { lt: dateTo } : {}),
+            },
+          }
+        : {}),
+    } satisfies Prisma.AuditLogWhereInput;
+    const select = {
         id: true,
         action: true,
         entityType: true,
         entityId: true,
         changes: true,
         createdAt: true,
-        actor: { select: { displayName: true, username: true, avatarUrl: true } },
+        actor: { select: { id: true, displayName: true, username: true, avatarUrl: true } },
+    } satisfies Prisma.AuditLogSelect;
+    const [items, total, authorRows] = await Promise.all([
+      this.prisma.auditLog.findMany({
+        where,
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        orderBy: { createdAt: 'desc' },
+        select,
+      }),
+      this.prisma.auditLog.count({ where }),
+      this.prisma.auditLog.findMany({
+        where: historyWhere,
+        take: 1000,
+        orderBy: { createdAt: 'desc' },
+        select: { actor: { select: { id: true, displayName: true, username: true, avatarUrl: true } } },
+      }),
+    ]);
+    const authors = [
+      ...new Map(
+        authorRows
+          .filter(({ actor }) => Boolean(actor))
+          .map(({ actor }) => [actor!.id, actor!]),
+      ).values(),
+    ].sort((left, right) =>
+      (left.displayName || left.username).localeCompare(
+        right.displayName || right.username,
+        'pt-PT',
+      ),
+    );
+    return {
+      status: true,
+      data: {
+        items,
+        authors,
+        total,
+        page,
+        pageSize,
+        totalPages: Math.max(1, Math.ceil(total / pageSize)),
       },
-    });
-    return { status: true, data };
+    };
   }
 
   async createTaxonomyItem(
@@ -1207,6 +1310,19 @@ export class RepoService {
       normalizedLeft.length === normalizedRight.length &&
       normalizedLeft.every((value, index) => value === normalizedRight[index])
     );
+  }
+
+  async commentAuthors() {
+    const data = await this.prisma.user.findMany({
+      orderBy: [{ displayName: 'asc' }, { username: 'asc' }],
+      select: {
+        id: true,
+        username: true,
+        displayName: true,
+        avatarUrl: true,
+      },
+    });
+    return { status: true, data };
   }
 
   async communicationComments(

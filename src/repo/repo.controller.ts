@@ -127,6 +127,11 @@ export class RepoController {
     });
   }
 
+  @Get('comment-authors')
+  commentAuthors() {
+    return this.repo.commentAuthors();
+  }
+
   @Post('taxonomy')
   createTaxonomyItem(
     @Body()
@@ -232,8 +237,21 @@ export class RepoController {
   communicationHistory(
     @Param('type') type: string,
     @Param('code') code: string,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+    @Query('authorId') authorId?: string,
+    @Query('action') action?: 'CREATE' | 'UPDATE' | 'DELETE',
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
   ) {
-    return this.repo.communicationHistory(type, code);
+    return this.repo.communicationHistory(type, code, {
+      page,
+      pageSize,
+      authorId,
+      action,
+      dateFrom,
+      dateTo,
+    });
   }
 
   @Get(':type/:code/comments')
