@@ -70,6 +70,7 @@ export class RepoService {
     const user = await this.prisma.user.findUnique({
       where: { gboxUserId },
       select: {
+        id: true,
         username: true,
         displayName: true,
         email: true,
@@ -77,7 +78,26 @@ export class RepoService {
       },
     });
     if (!user) throw new NotFoundException('User profile was not found.');
-    return { status: true, data: user };
+    const adminRole = await this.prisma.role.findUnique({
+      where: { key: 'admin' },
+      select: { id: true },
+    });
+    const adminAssignment = adminRole
+      ? await this.prisma.userRole.findFirst({
+          where: { userId: user.id, roleId: adminRole.id },
+          select: { userId: true },
+        })
+      : null;
+    return {
+      status: true,
+      data: {
+        username: user.username,
+        displayName: user.displayName,
+        email: user.email,
+        avatarUrl: user.avatarUrl,
+        isAdmin: Boolean(adminAssignment),
+      },
+    };
   }
 
   async updateProfile(
@@ -205,20 +225,36 @@ export class RepoService {
     }
   }
 
-  async templates(activity: 'all' | 'active' | 'pending' | 'inactive' = 'all') {
-    if (!['all', 'active', 'pending', 'inactive'].includes(activity)) {
+  async templates(
+    activity: 'all' | 'active' | 'pending' | 'scheduled' | 'inactive' = 'all',
+    categoryId?: string,
+    subcategoryId?: string,
+  ) {
+    if (
+      !['all', 'active', 'pending', 'scheduled', 'inactive'].includes(activity)
+    ) {
       throw new BadRequestException('Invalid communication activity filter.');
+    }
+    if (Boolean(categoryId) !== Boolean(subcategoryId)) {
+      throw new BadRequestException(
+        'Category and subcategory filters must be provided together.',
+      );
     }
 
     if (
       this.templatesCache?.expiresAt &&
       this.templatesCache.expiresAt > Date.now()
     ) {
+      const filtered = this.filterTemplatesByActivity(
+        this.templatesCache.data,
+        activity,
+      );
       return {
         status: true,
-        data: this.filterTemplatesByActivity(
-          this.templatesCache.data,
-          activity,
+        data: await this.filterTemplatesByTaxonomy(
+          filtered,
+          categoryId,
+          subcategoryId,
         ),
       };
     }
@@ -230,9 +266,14 @@ export class RepoService {
     if (snapshot && this.isObject(snapshot.payload)) {
       const data = snapshot.payload as GboxTemplates;
       this.cacheTemplates(data);
+      const filtered = this.filterTemplatesByActivity(data, activity);
       return {
         status: true,
-        data: this.filterTemplatesByActivity(data, activity),
+        data: await this.filterTemplatesByTaxonomy(
+          filtered,
+          categoryId,
+          subcategoryId,
+        ),
       };
     }
 
@@ -284,6 +325,7 @@ export class RepoService {
               ...(this.isObject(version.metadata) ? version.metadata : {}),
               versao: version.version,
               dataVersao: this.gboxDate(version.effectiveAt),
+              estado: version.status,
               ...Object.fromEntries(
                 version.localizations.map((localization) => [
                   localization.locale,
@@ -316,9 +358,14 @@ export class RepoService {
       },
     });
     this.cacheTemplates(data);
+    const filtered = this.filterTemplatesByActivity(data, activity);
     return {
       status: true,
-      data: this.filterTemplatesByActivity(data, activity),
+      data: await this.filterTemplatesByTaxonomy(
+        filtered,
+        categoryId,
+        subcategoryId,
+      ),
     };
   }
 
@@ -604,7 +651,12 @@ export class RepoService {
       changes: true,
       createdAt: true,
       actor: {
-        select: { id: true, displayName: true, username: true, avatarUrl: true },
+        select: {
+          id: true,
+          displayName: true,
+          username: true,
+          avatarUrl: true,
+        },
       },
     } satisfies Prisma.AuditLogSelect;
     const [items, total, authorRows] = await Promise.all([
@@ -622,7 +674,12 @@ export class RepoService {
         orderBy: { createdAt: 'desc' },
         select: {
           actor: {
-            select: { id: true, displayName: true, username: true, avatarUrl: true },
+            select: {
+              id: true,
+              displayName: true,
+              username: true,
+              avatarUrl: true,
+            },
           },
         },
       }),
@@ -652,23 +709,141 @@ export class RepoService {
     };
   }
 
-  async communicationHistory(type: string, code: string) {
+  async communicationHistory(
+    type: string,
+    code: string,
+    query: {
+      version?: string;
+      page?: string;
+      pageSize?: string;
+      authorId?: string;
+      action?: 'CREATE' | 'UPDATE' | 'DELETE';
+      dateFrom?: string;
+      dateTo?: string;
+    } = {},
+  ) {
     const communication = await this.resolveCommunication(type, code);
-    const data = await this.prisma.auditLog.findMany({
-      where: { entityType: 'communication', entityId: communication.id },
-      take: 100,
-      orderBy: { createdAt: 'desc' },
-      select: {
-        id: true,
-        action: true,
-        entityType: true,
-        entityId: true,
-        changes: true,
-        createdAt: true,
-        actor: { select: { displayName: true, username: true, avatarUrl: true } },
-      },
+    if (!query.version)
+      throw new BadRequestException('A versão da comunicação é obrigatória.');
+    const versions = await this.prisma.communicationVersion.findMany({
+      where: { communicationId: communication.id },
+      orderBy: { createdAt: 'asc' },
+      select: { version: true, createdAt: true },
     });
-    return { status: true, data };
+    const versionIndex = versions.findIndex(
+      ({ version }) => version === query.version,
+    );
+    if (versionIndex < 0)
+      throw new NotFoundException('Versão da comunicação não encontrada.');
+    const selectedVersion = versions[versionIndex];
+    const nextVersion = versions[versionIndex + 1];
+    const parsedPage = Number.parseInt(query.page ?? '1', 10);
+    const parsedPageSize = Number.parseInt(query.pageSize ?? '8', 10);
+    const page = Number.isFinite(parsedPage) ? Math.max(1, parsedPage) : 1;
+    const pageSize = Number.isFinite(parsedPageSize)
+      ? Math.min(50, Math.max(1, parsedPageSize))
+      : 8;
+    const parseDate = (value: string | undefined, endExclusive = false) => {
+      if (!value) return undefined;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value))
+        throw new BadRequestException('A data indicada não é válida.');
+      const date = new Date(`${value}T00:00:00.000Z`);
+      if (Number.isNaN(date.getTime()))
+        throw new BadRequestException('A data indicada não é válida.');
+      if (endExclusive) date.setUTCDate(date.getUTCDate() + 1);
+      return date;
+    };
+    const dateFrom = parseDate(query.dateFrom);
+    const dateTo = parseDate(query.dateTo, true);
+    if (dateFrom && dateTo && dateFrom >= dateTo)
+      throw new BadRequestException(
+        'A data inicial não pode ser posterior à data final.',
+      );
+    const versionDateFrom =
+      dateFrom && dateFrom > selectedVersion.createdAt
+        ? dateFrom
+        : selectedVersion.createdAt;
+    const versionDateTo =
+      dateTo && (!nextVersion || dateTo < nextVersion.createdAt)
+        ? dateTo
+        : nextVersion?.createdAt;
+    const historyWhere = {
+      entityType: 'communication',
+      entityId: communication.id,
+      createdAt: {
+        gte: versionDateFrom,
+        ...(versionDateTo ? { lt: versionDateTo } : {}),
+      },
+    } satisfies Prisma.AuditLogWhereInput;
+    const where = {
+      ...historyWhere,
+      ...(query.authorId ? { actorId: query.authorId } : {}),
+      ...(query.action ? { action: query.action } : {}),
+    } satisfies Prisma.AuditLogWhereInput;
+    const select = {
+      id: true,
+      action: true,
+      entityType: true,
+      entityId: true,
+      changes: true,
+      createdAt: true,
+      actor: {
+        select: {
+          id: true,
+          displayName: true,
+          username: true,
+          avatarUrl: true,
+        },
+      },
+    } satisfies Prisma.AuditLogSelect;
+    const [items, total, authorRows] = await Promise.all([
+      this.prisma.auditLog.findMany({
+        where,
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        orderBy: { createdAt: 'desc' },
+        select,
+      }),
+      this.prisma.auditLog.count({ where }),
+      this.prisma.auditLog.findMany({
+        where: historyWhere,
+        take: 1000,
+        orderBy: { createdAt: 'desc' },
+        select: {
+          actor: {
+            select: {
+              id: true,
+              displayName: true,
+              username: true,
+              avatarUrl: true,
+            },
+          },
+        },
+      }),
+    ]);
+    const authors = [
+      ...new Map(
+        authorRows
+          .filter(({ actor }) => Boolean(actor))
+          .map(({ actor }) => [actor!.id, actor!]),
+      ).values(),
+    ].sort((left, right) =>
+      (left.displayName || left.username).localeCompare(
+        right.displayName || right.username,
+        'pt-PT',
+      ),
+    );
+    return {
+      status: true,
+      data: {
+        items,
+        authors,
+        total,
+        page,
+        pageSize,
+        totalPages: Math.max(1, Math.ceil(total / pageSize)),
+      },
+    };
   }
 
   async createTaxonomyItem(
@@ -1209,6 +1384,19 @@ export class RepoService {
     );
   }
 
+  async commentAuthors() {
+    const data = await this.prisma.user.findMany({
+      orderBy: [{ displayName: 'asc' }, { username: 'asc' }],
+      select: {
+        id: true,
+        username: true,
+        displayName: true,
+        avatarUrl: true,
+      },
+    });
+    return { status: true, data };
+  }
+
   async communicationComments(
     type: string,
     code: string,
@@ -1666,12 +1854,12 @@ export class RepoService {
     gboxUserId?: string,
   ) {
     const channel = type.toUpperCase() === 'PUSH' ? 'BLIP' : type.toUpperCase();
-    if (channel !== 'SMS') {
+    if (!['SMS', 'EMAIL', 'CARTA'].includes(channel)) {
       throw new BadRequestException(
-        'A edição avançada está disponível apenas para comunicações SMS.',
+        'A edição do template principal não está disponível para este canal.',
       );
     }
-    await this.assertFullSmsEditingEnabled();
+    if (channel === 'SMS') await this.assertFullSmsEditingEnabled();
 
     const locale = (body.locale?.trim() || 'PT').toUpperCase();
     if (!/^[A-Z]{2,10}$/.test(locale)) {
@@ -1679,9 +1867,9 @@ export class RepoService {
     }
 
     const content = body.content === null ? '' : (body.content ?? '');
-    if (content.length > 5000) {
+    if (content.length > 5_000_000) {
       throw new BadRequestException(
-        'O conteúdo SMS não pode exceder 5000 caracteres.',
+        'O conteúdo do template não pode exceder 5 MB.',
       );
     }
 
@@ -1695,8 +1883,32 @@ export class RepoService {
             select: {
               id: true,
               version: true,
+              status: true,
+              sourceTicketId: true,
+              metadata: true,
               localizations: {
-                select: { id: true, locale: true, content: true },
+                select: {
+                  id: true,
+                  locale: true,
+                  subject: true,
+                  content: true,
+                  filename: true,
+                  mimeType: true,
+                  previewFilename: true,
+                  previewBase64: true,
+                  sourcePayload: true,
+                },
+              },
+              variables: {
+                orderBy: { sortOrder: 'asc' },
+                select: {
+                  key: true,
+                  description: true,
+                  placeholder: true,
+                  sampleValue: true,
+                  isRequired: true,
+                  sortOrder: true,
+                },
               },
             },
           },
@@ -1730,13 +1942,54 @@ export class RepoService {
     if (previous === content) {
       return {
         status: true,
-        data: { version: selectedVersion.version, locale, content },
+        data: {
+          version: selectedVersion.version,
+          sourceVersion: selectedVersion.version,
+          locale,
+          content,
+          versionCreated: false,
+          versionStatus: selectedVersion.status,
+        },
       };
     }
 
-    await this.prisma.communicationLocalization.update({
-      where: { id: localization.id },
-      data: { content },
+    const nextVersion = this.nextCommunicationVersion(
+      communication.versions.map(({ version }) => version),
+    );
+    const createdVersion = await this.prisma.communicationVersion.create({
+      data: {
+        communicationId: communication.id,
+        version: nextVersion,
+        status: 'PENDING',
+        effectiveAt: null,
+        publishedAt: null,
+        createdById: actor?.id,
+        sourceTicketId: selectedVersion.sourceTicketId,
+        metadata: selectedVersion.metadata ?? undefined,
+        localizations: {
+          create: selectedVersion.localizations.map((item) => ({
+            locale: item.locale,
+            subject: item.subject,
+            content: item.id === localization.id ? content : item.content,
+            filename: item.filename,
+            mimeType: item.mimeType,
+            previewFilename: item.previewFilename,
+            previewBase64: item.previewBase64,
+            sourcePayload: item.sourcePayload ?? undefined,
+          })),
+        },
+        variables: {
+          create: selectedVersion.variables.map((variable) => ({
+            key: variable.key,
+            description: variable.description,
+            placeholder: variable.placeholder,
+            sampleValue: variable.sampleValue,
+            isRequired: variable.isRequired,
+            sortOrder: variable.sortOrder,
+          })),
+        },
+      },
+      select: { id: true },
     });
 
     await this.prisma.auditLog.create({
@@ -1751,7 +2004,8 @@ export class RepoService {
             content: {
               previous,
               current: content,
-              version: selectedVersion.version,
+              sourceVersion: selectedVersion.version,
+              version: nextVersion,
               locale,
             },
           },
@@ -1759,10 +2013,11 @@ export class RepoService {
       },
     });
 
-    await this.updateTemplateSnapshotContent(
+    await this.addPendingTemplateSnapshotVersion(
       channel,
       code,
       selectedVersion.version,
+      nextVersion,
       locale,
       content,
     );
@@ -1770,7 +2025,15 @@ export class RepoService {
     this.invalidateTemplatesCache();
     return {
       status: true,
-      data: { version: selectedVersion.version, locale, content },
+      data: {
+        id: createdVersion.id,
+        version: nextVersion,
+        sourceVersion: selectedVersion.version,
+        locale,
+        content,
+        versionCreated: true,
+        versionStatus: 'PENDING',
+      },
     };
   }
 
@@ -1896,6 +2159,88 @@ export class RepoService {
       data: {
         categories: categoryNames,
         subcategories: subcategoryNames,
+      },
+    };
+  }
+
+  async scheduleCommunicationVersion(
+    type: string,
+    code: string,
+    version: string,
+    body: { publicationDate?: string },
+    gboxUserId?: string,
+  ) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(body.publicationDate ?? ''))
+      throw new BadRequestException('A data de publicação não é válida.');
+    const publicationDate = new Date(`${body.publicationDate}T00:00:00.000Z`);
+    const tomorrow = new Date();
+    tomorrow.setUTCHours(0, 0, 0, 0);
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+    if (Number.isNaN(publicationDate.getTime()) || publicationDate < tomorrow)
+      throw new BadRequestException(
+        'A data de publicação deve ser a partir de amanhã.',
+      );
+
+    const channel = type.toUpperCase() === 'PUSH' ? 'BLIP' : type.toUpperCase();
+    const repositoryChannel = await this.prisma.channel.findUnique({
+      where: { key: channel },
+      select: { id: true },
+    });
+    if (!repositoryChannel)
+      throw new NotFoundException('Comunicação não encontrada.');
+    const communication = await this.prisma.communication.findFirst({
+      where: { code, channelId: repositoryChannel.id },
+      select: { id: true },
+    });
+    if (!communication)
+      throw new NotFoundException('Comunicação não encontrada.');
+    const selectedVersion = await this.prisma.communicationVersion.findFirst({
+      where: { communicationId: communication.id, version },
+      select: { id: true, status: true },
+    });
+    if (!selectedVersion)
+      throw new NotFoundException('Versão da comunicação não encontrada.');
+    if (selectedVersion.status !== 'PENDING')
+      throw new BadRequestException(
+        'Apenas versões pendentes podem ser agendadas.',
+      );
+    const actor = gboxUserId
+      ? await this.prisma.user.findUnique({
+          where: { gboxUserId },
+          select: { id: true },
+        })
+      : null;
+    await this.prisma.communicationVersion.update({
+      where: { id: selectedVersion.id },
+      data: { status: 'SCHEDULED', effectiveAt: publicationDate },
+    });
+    await this.prisma.auditLog.create({
+      data: {
+        actorId: actor?.id,
+        action: 'UPDATE',
+        entityType: 'communication',
+        entityId: communication.id,
+        changes: this.toJson({
+          operation: 'schedule',
+          version,
+          publicationDate: body.publicationDate,
+        }),
+      },
+    });
+    await this.updateTemplateSnapshotVersionSchedule(
+      channel,
+      code,
+      version,
+      publicationDate,
+    );
+    this.invalidateTemplatesCache();
+    return {
+      status: true,
+      data: {
+        version,
+        publicationDate: body.publicationDate,
+        effectiveAt: this.gboxDate(publicationDate),
+        status: 'SCHEDULED',
       },
     };
   }
@@ -2379,7 +2724,7 @@ export class RepoService {
 
   private filterTemplatesByActivity(
     templates: GboxTemplates,
-    activity: 'all' | 'active' | 'pending' | 'inactive',
+    activity: 'all' | 'active' | 'pending' | 'scheduled' | 'inactive',
   ): GboxTemplates {
     if (activity === 'all') return templates;
 
@@ -2393,19 +2738,80 @@ export class RepoService {
       filtered[channel] = Object.fromEntries(
         Object.entries(channelTemplates).filter(([, template]) => {
           const versions = Object.values(template.versoes ?? {});
-          if (activity === 'inactive') return versions.length === 0;
-          if (versions.length === 0) return false;
+          if (versions.length === 0) return activity === 'inactive';
 
-          const newestLaunch = versions
-            .map((version) => this.parseGboxDate(version.dataVersao))
-            .filter((date): date is Date => Boolean(date))
+          const now = new Date();
+          const datedVersions = versions
+            .map((version) => ({
+              version,
+              date: this.parseGboxDate(version.dataVersao),
+            }))
+            .filter(
+              (
+                entry,
+              ): entry is { version: (typeof versions)[number]; date: Date } =>
+                Boolean(entry.date),
+            );
+          const activeDate = datedVersions
+            .map(({ date }) => date)
+            .filter((date) => date <= now)
             .sort((left, right) => right.getTime() - left.getTime())[0];
-          const isPending = Boolean(newestLaunch && newestLaunch > new Date());
-          return activity === 'pending' ? isPending : !isPending;
+          const statuses = versions.map((version) => {
+            if (version.estado === 'PENDING') return 'pending';
+            if (version.estado === 'SCHEDULED') return 'scheduled';
+            if (version.estado === 'ARCHIVED') return 'inactive';
+            const date = this.parseGboxDate(version.dataVersao);
+            if (!date) return 'inactive';
+            if (date > now) return 'scheduled';
+            return date.getTime() === activeDate?.getTime()
+              ? 'active'
+              : 'inactive';
+          });
+          return activity === 'active'
+            ? statuses.includes('active') || statuses.includes('scheduled')
+            : statuses.includes(activity);
         }),
       );
     }
 
+    return filtered;
+  }
+
+  private async filterTemplatesByTaxonomy(
+    templates: GboxTemplates,
+    categoryId?: string,
+    subcategoryId?: string,
+  ): Promise<GboxTemplates> {
+    if (!categoryId || !subcategoryId) return templates;
+
+    const assignments = await this.prisma.communicationSubcategory.findMany({
+      where: { categoryId, subcategoryId },
+      select: {
+        communication: {
+          select: {
+            code: true,
+            channel: { select: { key: true } },
+          },
+        },
+      },
+    });
+    const allowed = new Set(
+      assignments.map(({ communication: { channel, code } }) =>
+        `${channel.key}:${code}`,
+      ),
+    );
+    const filtered: GboxTemplates = {};
+    for (const [channel, channelTemplates] of Object.entries(templates)) {
+      if (!channelTemplates || Array.isArray(channelTemplates)) {
+        filtered[channel] = channelTemplates;
+        continue;
+      }
+      filtered[channel] = Object.fromEntries(
+        Object.entries(channelTemplates).filter(([code]) =>
+          allowed.has(`${channel}:${code}`),
+        ),
+      );
+    }
     return filtered;
   }
 
@@ -2475,10 +2881,24 @@ export class RepoService {
     });
   }
 
-  private async updateTemplateSnapshotContent(
+  private nextCommunicationVersion(existingVersions: string[]) {
+    const numericVersions = existingVersions
+      .map((version) => /^v(\d+)$/i.exec(version)?.[1])
+      .filter((value): value is string => Boolean(value))
+      .map(Number);
+    const nextNumber = Math.max(0, ...numericVersions) + 1;
+    const conventionalVersion = `v${nextNumber}`;
+    if (!existingVersions.includes(conventionalVersion)) {
+      return conventionalVersion;
+    }
+    return `pending-${Date.now()}`;
+  }
+
+  private async addPendingTemplateSnapshotVersion(
     channel: string,
     code: string,
-    version: string,
+    sourceVersion: string,
+    nextVersion: string,
     locale: string,
     content: string,
   ) {
@@ -2497,9 +2917,9 @@ export class RepoService {
     const versions = this.isObject(communication.versoes)
       ? (communication.versoes as JsonObject)
       : {};
-    const versionValue = versions[version];
+    const versionValue = versions[sourceVersion];
     const versionEntry = this.isObject(versionValue)
-      ? (versionValue as JsonObject)
+      ? (JSON.parse(JSON.stringify(versionValue)) as JsonObject)
       : {};
     const localeValue = versionEntry[locale];
     const localeEntry = this.isObject(localeValue)
@@ -2508,9 +2928,39 @@ export class RepoService {
 
     localeEntry.text = content;
     versionEntry[locale] = localeEntry;
-    versions[version] = versionEntry;
+    versionEntry.versao = nextVersion;
+    versionEntry.dataVersao = undefined;
+    versionEntry.estado = 'PENDING';
+    versions[nextVersion] = versionEntry;
     communication.versoes = versions;
 
+    await this.prisma.repositorySnapshot.update({
+      where: { key: 'gbox-templates' },
+      data: { payload: this.toJson(payload), syncedAt: new Date() },
+    });
+  }
+
+  private async updateTemplateSnapshotVersionSchedule(
+    channel: string,
+    code: string,
+    version: string,
+    publicationDate: Date,
+  ) {
+    const snapshot = await this.prisma.repositorySnapshot.findUnique({
+      where: { key: 'gbox-templates' },
+      select: { payload: true },
+    });
+    if (!snapshot || !this.isObject(snapshot.payload)) return;
+    const payload = JSON.parse(JSON.stringify(snapshot.payload)) as JsonObject;
+    const channelData = payload[channel];
+    if (!this.isObject(channelData)) return;
+    const communication = channelData[code];
+    if (!this.isObject(communication) || !this.isObject(communication.versoes))
+      return;
+    const versionEntry = communication.versoes[version];
+    if (!this.isObject(versionEntry)) return;
+    versionEntry.estado = 'SCHEDULED';
+    versionEntry.dataVersao = this.gboxDate(publicationDate);
     await this.prisma.repositorySnapshot.update({
       where: { key: 'gbox-templates' },
       data: { payload: this.toJson(payload), syncedAt: new Date() },

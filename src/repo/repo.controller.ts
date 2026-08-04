@@ -70,9 +70,12 @@ export class RepoController {
   @Get()
   @Header('Cache-Control', 'no-store')
   templates(
-    @Query('activity') activity?: 'all' | 'active' | 'pending' | 'inactive',
+    @Query('activity')
+    activity?: 'all' | 'active' | 'pending' | 'scheduled' | 'inactive',
+    @Query('categoryId') categoryId?: string,
+    @Query('subcategoryId') subcategoryId?: string,
   ) {
-    return this.repo.templates(activity);
+    return this.repo.templates(activity, categoryId, subcategoryId);
   }
 
   @Post('sync')
@@ -125,6 +128,11 @@ export class RepoController {
       dateFrom,
       dateTo,
     });
+  }
+
+  @Get('comment-authors')
+  commentAuthors() {
+    return this.repo.commentAuthors();
   }
 
   @Post('taxonomy')
@@ -228,12 +236,44 @@ export class RepoController {
     return this.repo.updateCommunicationContent(type, code, body, userId);
   }
 
+  @Patch(':type/:code/versions/:version/schedule')
+  scheduleCommunicationVersion(
+    @Param('type') type: string,
+    @Param('code') code: string,
+    @Param('version') version: string,
+    @Body() body: { publicationDate?: string },
+    @Headers('x-repo-user-id') userId?: string,
+  ) {
+    return this.repo.scheduleCommunicationVersion(
+      type,
+      code,
+      version,
+      body,
+      userId,
+    );
+  }
+
   @Get(':type/:code/history')
   communicationHistory(
     @Param('type') type: string,
     @Param('code') code: string,
+    @Query('version') version?: string,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+    @Query('authorId') authorId?: string,
+    @Query('action') action?: 'CREATE' | 'UPDATE' | 'DELETE',
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
   ) {
-    return this.repo.communicationHistory(type, code);
+    return this.repo.communicationHistory(type, code, {
+      version,
+      page,
+      pageSize,
+      authorId,
+      action,
+      dateFrom,
+      dateTo,
+    });
   }
 
   @Get(':type/:code/comments')
