@@ -8,6 +8,7 @@ export type GboxLocalizedVersion = {
 export type GboxVersion = {
   versao?: string;
   dataVersao?: string;
+  estado?: string;
   [locale: string]: string | GboxLocalizedVersion | undefined;
 };
 
