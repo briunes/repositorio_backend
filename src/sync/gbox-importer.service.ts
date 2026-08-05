@@ -10,12 +10,13 @@ import {
 
 type ImportEntry = { channel: string; code: string; template: GboxTemplate };
 type PreparedCommunication = { id: string; contentIsUnchanged: boolean };
+type ImportOptions = { fullReplace?: boolean };
 
 @Injectable()
 export class GboxImporterService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async import(templates: GboxTemplates) {
+  async import(templates: GboxTemplates, options: ImportOptions = {}) {
     const run = await this.prisma.syncRun.create({
       data: { source: 'GBOX' },
     });
@@ -27,6 +28,7 @@ export class GboxImporterService {
           'GBox sync returned no communications; local data was preserved.',
         );
       }
+      if (options.fullReplace) await this.resetCommunicationRepository();
       const lookups = await this.prepareLookups(entries);
       const communications = await this.upsertCommunications(entries, lookups);
       await this.prisma.syncRun.update({
@@ -110,6 +112,47 @@ export class GboxImporterService {
       });
       throw error;
     }
+  }
+
+  /**
+   * Remove the repository data rebuilt from GBox. Workflow tables introduced
+   * after the original importer contain restrictive version foreign keys, so
+   * they must be cleared before communications can be removed.
+   *
+   * Teams are deliberately retained: they now own memberships, permissions,
+   * and workflow configuration. The import refreshes/reuses matching teams.
+   */
+  private async resetCommunicationRepository() {
+    // API database mode rejects unfiltered DELETE requests. These required-key
+    // predicates match every valid row while still producing a WHERE clause.
+    await this.prisma.communicationActiveVersion.deleteMany({
+      where: { communicationId: { not: '' } },
+    });
+    await this.prisma.deployment.deleteMany({
+      where: { id: { not: '' } },
+    });
+    await this.prisma.approvalDecision.deleteMany({
+      where: { id: { not: '' } },
+    });
+    await this.prisma.communicationComment.deleteMany({
+      where: { id: { not: '' } },
+    });
+    await this.prisma.approvalRequest.deleteMany({
+      where: { id: { not: '' } },
+    });
+    await this.prisma.communication.deleteMany({
+      where: { id: { not: '' } },
+    });
+
+    // These lookup tables are exclusively rebuilt from repository content.
+    await this.prisma.categorySubcategory.deleteMany({
+      where: { categoryId: { not: '' } },
+    });
+    await this.prisma.category.deleteMany({ where: { id: { not: '' } } });
+    await this.prisma.subcategory.deleteMany({ where: { id: { not: '' } } });
+    await this.prisma.service.deleteMany({ where: { id: { not: '' } } });
+    await this.prisma.tag.deleteMany({ where: { id: { not: '' } } });
+    await this.prisma.channel.deleteMany({ where: { id: { not: '' } } });
   }
 
   private async upsertCommunications(
@@ -251,7 +294,9 @@ export class GboxImporterService {
       channelId: lookups.channels.get(channel)!,
       code,
       name: template.nome?.trim() || code,
-      description: template.desc?.trim(),
+      // createMany is sent through PostgREST in API database mode. Every row
+      // in a bulk insert must have the same keys, hence explicit nulls here.
+      description: template.desc?.trim() || null,
       status:
         latestDate && latestDate > now
           ? 'PENDING'
@@ -260,7 +305,7 @@ export class GboxImporterService {
             : 'INACTIVE',
       sourceSystem: 'GBOX',
       sourceId: `${channel}:${code}`,
-      templateFolder: template.templateFolder,
+      templateFolder: template.templateFolder ?? null,
       metadata: this.json(template),
       lastSyncedAt: now,
     };

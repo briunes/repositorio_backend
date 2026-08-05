@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { Prisma, TeamMemberRole } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { VersionService } from '../version/version.service';
 
@@ -34,6 +35,13 @@ export class AdminService {
         createdAt: true,
         roles: {
           select: { role: { select: { id: true, key: true, name: true } } },
+        },
+        teamMemberships: {
+          select: {
+            role: true,
+            team: { select: { id: true, name: true, isActive: true } },
+          },
+          orderBy: { assignedAt: 'asc' },
         },
       },
     });
@@ -83,6 +91,94 @@ export class AdminService {
       });
     }
     return { status: true, data: { userId, roleIds: uniqueRoleIds } };
+  }
+
+  async updateUserTeam(
+    userId: string,
+    teamId?: string | null,
+    role: TeamMemberRole = 'VIEWER',
+  ) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true },
+    });
+    if (!user) throw new NotFoundException('Utilizador não encontrado.');
+    const allowedRoles = new Set<TeamMemberRole>([
+      'VIEWER',
+      'EDITOR',
+      'APPROVER',
+      'PUBLISHER',
+      'OWNER',
+    ]);
+    if (!allowedRoles.has(role))
+      throw new BadRequestException('Função na equipa inválida.');
+    if (teamId) {
+      const team = await this.prisma.team.findUnique({
+        where: { id: teamId },
+        select: { id: true, isActive: true },
+      });
+      if (!team) throw new NotFoundException('Equipa não encontrada.');
+      if (!team.isActive)
+        throw new BadRequestException('A equipa selecionada está inativa.');
+    }
+    await this.prisma.teamMember.deleteMany({ where: { userId } });
+    if (teamId) {
+      await this.prisma.teamMember.create({ data: { userId, teamId, role } });
+    }
+    return { status: true, data: { userId, teamId: teamId || null, role: teamId ? role : null } };
+  }
+
+  async updateUser(
+    userId: string,
+    body: { name?: string; avatarUrl?: string | null },
+  ) {
+    const name = body.name?.trim();
+    if (!name) throw new BadRequestException('O nome é obrigatório.');
+    if (name.length > 160)
+      throw new BadRequestException('O nome é demasiado longo.');
+    const avatarUrl = body.avatarUrl?.trim() || null;
+    if (
+      avatarUrl &&
+      (!/^data:image\/(?:jpeg|png|webp);base64,/.test(avatarUrl) ||
+        avatarUrl.length > 1_500_000)
+    ) {
+      throw new BadRequestException('A fotografia é inválida ou demasiado grande.');
+    }
+    try {
+      const data = await this.prisma.user.update({
+        where: { id: userId },
+        data: { displayName: name, avatarUrl },
+        select: {
+          id: true,
+          username: true,
+          displayName: true,
+          avatarUrl: true,
+          email: true,
+          status: true,
+          lastLoginAt: true,
+          createdAt: true,
+          roles: {
+            select: { role: { select: { id: true, key: true, name: true } } },
+          },
+          teamMemberships: {
+            select: {
+              role: true,
+              team: { select: { id: true, name: true, isActive: true } },
+            },
+            orderBy: { assignedAt: 'asc' },
+          },
+        },
+      });
+      return { status: true, data };
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2025'
+      ) {
+        throw new NotFoundException('Utilizador não encontrado.');
+      }
+      throw error;
+    }
   }
 
   async createRole(body: {
@@ -251,6 +347,8 @@ export class AdminService {
         maintenanceMode: Boolean(body.maintenanceMode),
         readOnlyMode: Boolean(body.readOnlyMode),
         fullSmsEditingEnabled: Boolean(body.fullSmsEditingEnabled),
+        myWorkEnabled: Boolean(body.myWorkEnabled),
+        notificationsEnabled: Boolean(body.notificationsEnabled),
         maintenanceMessage,
         environmentName,
       },
@@ -266,6 +364,8 @@ export class AdminService {
         maintenanceMode: Boolean(body.maintenanceMode),
         readOnlyMode: Boolean(body.readOnlyMode),
         fullSmsEditingEnabled: Boolean(body.fullSmsEditingEnabled),
+        myWorkEnabled: Boolean(body.myWorkEnabled),
+        notificationsEnabled: Boolean(body.notificationsEnabled),
         maintenanceMessage,
         environmentName,
       },
@@ -325,6 +425,8 @@ export class AdminService {
       maintenanceMode: true,
       readOnlyMode: true,
       fullSmsEditingEnabled: true,
+      myWorkEnabled: true,
+      notificationsEnabled: true,
       maintenanceMessage: true,
       environmentName: true,
       updatedAt: true,

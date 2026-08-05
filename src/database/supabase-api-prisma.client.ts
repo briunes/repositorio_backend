@@ -65,7 +65,9 @@ const models: Record<string, ModelMeta> = Object.fromEntries(
               foreignField,
               constraint: localField
                 ? `${table}_${databaseField(modelName, localField)}_fkey`
-                : undefined,
+                : foreignField
+                  ? `${targetTable}_${databaseField(adapterModelName(field.type), foreignField)}_fkey`
+                  : undefined,
             } satisfies RelationMeta,
           ];
         }),

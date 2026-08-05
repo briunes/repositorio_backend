@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  GoneException,
   Header,
   Headers,
   Param,
@@ -28,11 +29,16 @@ export class RepoController {
     return this.repo.profile(userId);
   }
 
+  @Get('user-context')
+  userContext(@Headers('x-repo-user-id') userId?: string) {
+    return this.repo.userContext(userId);
+  }
+
   @Patch('profile')
   updateProfile(
     @Headers('x-repo-user-id') userId: string | undefined,
     @Body()
-    body: { name?: string; email?: string | null; avatarUrl?: string | null },
+    body: { name?: string; avatarUrl?: string | null },
   ) {
     return this.repo.updateProfile(userId, body);
   }
@@ -81,9 +87,9 @@ export class RepoController {
   @Post('sync')
   sync(
     @Headers('x-gbox-authorization') authorization?: string,
-    @Body() body?: { userId?: string | number },
+    @Body() body?: { userId?: string | number; fullReplace?: boolean },
   ) {
-    return this.repo.sync(authorization, body?.userId);
+    return this.repo.sync(authorization, body?.userId, body?.fullReplace);
   }
 
   @Post('sync/details')
@@ -143,6 +149,7 @@ export class RepoController {
       description?: string | null;
       kind?: 'category' | 'subcategory';
       parentId?: string | null;
+      iconData?: string | null;
     },
     @Headers('x-repo-user-id') userId?: string,
   ) {
@@ -183,6 +190,7 @@ export class RepoController {
       name?: string;
       description?: string | null;
       kind?: 'category' | 'subcategory';
+      iconData?: string | null;
     },
     @Headers('x-repo-user-id') userId?: string,
   ) {
@@ -206,6 +214,27 @@ export class RepoController {
     @Headers('x-repo-user-id') userId?: string,
   ) {
     return this.repo.updateCommunicationTaxonomy(type, code, body, userId);
+  }
+
+  @Patch(':type/:code')
+  saveCommunication(
+    @Param('type') type: string,
+    @Param('code') code: string,
+    @Body()
+    body: {
+      taxonomy?: { categoryIds?: string[]; subcategoryIds?: string[] };
+      properties?: {
+        name?: string | null;
+        description?: string | null;
+        tags?: string[];
+        services?: string[];
+        teams?: string[];
+      };
+      content?: { version?: string; locale?: string; content?: string | null };
+    },
+    @Headers('x-repo-user-id') userId?: string,
+  ) {
+    return this.repo.saveCommunication(type, code, body, userId);
   }
 
   @Patch(':type/:code/properties')
@@ -244,12 +273,13 @@ export class RepoController {
     @Body() body: { publicationDate?: string },
     @Headers('x-repo-user-id') userId?: string,
   ) {
-    return this.repo.scheduleCommunicationVersion(
-      type,
-      code,
-      version,
-      body,
-      userId,
+    void type;
+    void code;
+    void version;
+    void body;
+    void userId;
+    throw new GoneException(
+      'O agendamento direto foi substituído pelo workflow de aprovação e implementação.',
     );
   }
 
@@ -280,6 +310,7 @@ export class RepoController {
   communicationComments(
     @Param('type') type: string,
     @Param('code') code: string,
+    @Query('version') version: string,
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
     @Query('authorId') authorId?: string,
@@ -287,6 +318,7 @@ export class RepoController {
     @Query('dateTo') dateTo?: string,
   ) {
     return this.repo.communicationComments(type, code, {
+      version,
       page,
       pageSize,
       authorId,
@@ -299,7 +331,7 @@ export class RepoController {
   createCommunicationComment(
     @Param('type') type: string,
     @Param('code') code: string,
-    @Body() body: { content?: string },
+    @Body() body: { content?: string; version?: string },
     @Headers('x-repo-user-id') userId?: string,
   ) {
     return this.repo.createCommunicationComment(type, code, body, userId);
@@ -310,7 +342,7 @@ export class RepoController {
     @Param('type') type: string,
     @Param('code') code: string,
     @Param('commentId') commentId: string,
-    @Body() body: { content?: string },
+    @Body() body: { content?: string; version?: string },
     @Headers('x-repo-user-id') userId?: string,
   ) {
     return this.repo.updateCommunicationComment(
@@ -327,9 +359,16 @@ export class RepoController {
     @Param('type') type: string,
     @Param('code') code: string,
     @Param('commentId') commentId: string,
+    @Query('version') version: string,
     @Headers('x-repo-user-id') userId?: string,
   ) {
-    return this.repo.deleteCommunicationComment(type, code, commentId, userId);
+    return this.repo.deleteCommunicationComment(
+      type,
+      code,
+      commentId,
+      version,
+      userId,
+    );
   }
 
   @Get('details')
