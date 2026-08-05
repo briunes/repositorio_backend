@@ -32,7 +32,6 @@ type TaxonomyData = {
 export class RepoService {
   private readonly baseUrl?: string;
   private templatesCache?: { data: GboxTemplates; expiresAt: number };
-  private filtersCache?: { data: JsonObject; expiresAt: number };
   private taxonomyCache?: { data: TaxonomyData; expiresAt: number };
   private taxonomyRefresh?: Promise<{ data: TaxonomyData; generation: number }>;
   private taxonomyGeneration = 0;
@@ -538,10 +537,6 @@ export class RepoService {
   }
 
   async filters() {
-    if (this.filtersCache && this.filtersCache.expiresAt > Date.now()) {
-      return { status: true, data: this.filtersCache.data };
-    }
-
     // One round trip is important on serverless deployments, where Prisma is
     // intentionally limited to one pooled connection per function instance.
     const [row] = await this.prisma.$queryRaw<Array<{ data: JsonObject }>>`
@@ -583,8 +578,6 @@ export class RepoService {
       ) AS data
     `;
     const data = row?.data ?? {};
-    this.filtersCache = { data, expiresAt: Date.now() + 5 * 60_000 };
-
     return {
       status: true,
       data,
@@ -2936,18 +2929,39 @@ export class RepoService {
   private async enrichTemplatesWithTaxonomyPairs(
     templates: GboxTemplates,
   ): Promise<GboxTemplates> {
-    const assignments = await this.prisma.communicationSubcategory.findMany({
-      select: {
-        category: { select: { name: true } },
-        subcategory: { select: { name: true } },
-        communication: {
-          select: {
-            code: true,
-            channel: { select: { key: true } },
+    const [assignments, activeCategories, activeSubcategories] =
+      await Promise.all([
+        this.prisma.communicationSubcategory.findMany({
+          where: {
+            category: { isActive: true },
+            subcategory: { isActive: true },
           },
-        },
-      },
-    });
+          select: {
+            category: { select: { name: true } },
+            subcategory: { select: { name: true } },
+            communication: {
+              select: {
+                code: true,
+                channel: { select: { key: true } },
+              },
+            },
+          },
+        }),
+        this.prisma.category.findMany({
+          where: { isActive: true },
+          select: { name: true },
+        }),
+        this.prisma.subcategory.findMany({
+          where: { isActive: true },
+          select: { name: true },
+        }),
+      ]);
+    const activeCategoryNames = new Set(
+      activeCategories.map(({ name }) => name.toLocaleLowerCase('pt-PT')),
+    );
+    const activeSubcategoryNames = new Set(
+      activeSubcategories.map(({ name }) => name.toLocaleLowerCase('pt-PT')),
+    );
     const pairsByCommunication = new Map<
       string,
       Array<{ category: string; subcategory: string }>
@@ -2974,6 +2988,12 @@ export class RepoService {
               code,
               {
                 ...template,
+                categoria: template.categoria?.filter((name) =>
+                  activeCategoryNames.has(name.toLocaleLowerCase('pt-PT')),
+                ),
+                subcategoria: template.subcategoria?.filter((name) =>
+                  activeSubcategoryNames.has(name.toLocaleLowerCase('pt-PT')),
+                ),
                 taxonomyPairs:
                   pairsByCommunication.get(`${channel}:${code}`) ?? [],
               },
@@ -2992,7 +3012,12 @@ export class RepoService {
     if (!categoryId || !subcategoryId) return templates;
 
     const assignments = await this.prisma.communicationSubcategory.findMany({
-      where: { categoryId, subcategoryId },
+      where: {
+        categoryId,
+        subcategoryId,
+        category: { isActive: true },
+        subcategory: { isActive: true },
+      },
       select: {
         communication: {
           select: {
@@ -3039,7 +3064,6 @@ export class RepoService {
   }
 
   private invalidateFiltersCache() {
-    this.filtersCache = undefined;
     this.taxonomyCache = undefined;
     this.taxonomyGeneration += 1;
   }
