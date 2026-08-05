@@ -32,9 +32,6 @@ type TaxonomyData = {
 export class RepoService {
   private readonly baseUrl?: string;
   private templatesCache?: { data: GboxTemplates; expiresAt: number };
-  private taxonomyCache?: { data: TaxonomyData; expiresAt: number };
-  private taxonomyRefresh?: Promise<{ data: TaxonomyData; generation: number }>;
-  private taxonomyGeneration = 0;
 
   constructor(
     config: ConfigService,
@@ -585,28 +582,13 @@ export class RepoService {
   }
 
   async taxonomy() {
-    if (this.taxonomyCache && this.taxonomyCache.expiresAt > Date.now()) {
-      markRequestCache('hit');
-      return { status: true, data: this.taxonomyCache.data };
-    }
-
+    // Taxonomy is mutable administrative data. A process-local cache cannot be
+    // invalidated reliably when production runs more than one API instance:
+    // the instance handling a write has no way to clear the other instances.
+    // Always read the shared database so a successful mutation is immediately
+    // visible regardless of which instance serves the next request.
     markRequestCache('miss');
-    if (!this.taxonomyRefresh) {
-      const generation = this.taxonomyGeneration;
-      this.taxonomyRefresh = this.loadTaxonomy().then((data) => ({
-        data,
-        generation,
-      }));
-    }
-    try {
-      const { data, generation } = await this.taxonomyRefresh;
-      if (generation === this.taxonomyGeneration) {
-        this.taxonomyCache = { data, expiresAt: Date.now() + 5 * 60_000 };
-      }
-      return { status: true, data };
-    } finally {
-      this.taxonomyRefresh = undefined;
-    }
+    return { status: true, data: await this.loadTaxonomy() };
   }
 
   private async loadTaxonomy(): Promise<TaxonomyData> {
@@ -2929,39 +2911,22 @@ export class RepoService {
   private async enrichTemplatesWithTaxonomyPairs(
     templates: GboxTemplates,
   ): Promise<GboxTemplates> {
-    const [assignments, activeCategories, activeSubcategories] =
-      await Promise.all([
-        this.prisma.communicationSubcategory.findMany({
-          where: {
-            category: { isActive: true },
-            subcategory: { isActive: true },
-          },
+    const assignments = await this.prisma.communicationSubcategory.findMany({
+      where: {
+        category: { isActive: true },
+        subcategory: { isActive: true },
+      },
+      select: {
+        category: { select: { name: true } },
+        subcategory: { select: { name: true } },
+        communication: {
           select: {
-            category: { select: { name: true } },
-            subcategory: { select: { name: true } },
-            communication: {
-              select: {
-                code: true,
-                channel: { select: { key: true } },
-              },
-            },
+            code: true,
+            channel: { select: { key: true } },
           },
-        }),
-        this.prisma.category.findMany({
-          where: { isActive: true },
-          select: { name: true },
-        }),
-        this.prisma.subcategory.findMany({
-          where: { isActive: true },
-          select: { name: true },
-        }),
-      ]);
-    const activeCategoryNames = new Set(
-      activeCategories.map(({ name }) => name.toLocaleLowerCase('pt-PT')),
-    );
-    const activeSubcategoryNames = new Set(
-      activeSubcategories.map(({ name }) => name.toLocaleLowerCase('pt-PT')),
-    );
+        },
+      },
+    });
     const pairsByCommunication = new Map<
       string,
       Array<{ category: string; subcategory: string }>
@@ -2984,20 +2949,25 @@ export class RepoService {
         return [
           channel,
           Object.fromEntries(
-            Object.entries(channelTemplates).map(([code, template]) => [
-              code,
-              {
-                ...template,
-                categoria: template.categoria?.filter((name) =>
-                  activeCategoryNames.has(name.toLocaleLowerCase('pt-PT')),
-                ),
-                subcategoria: template.subcategoria?.filter((name) =>
-                  activeSubcategoryNames.has(name.toLocaleLowerCase('pt-PT')),
-                ),
-                taxonomyPairs:
-                  pairsByCommunication.get(`${channel}:${code}`) ?? [],
-              },
-            ]),
+            Object.entries(channelTemplates).map(([code, template]) => {
+              const taxonomyPairs =
+                pairsByCommunication.get(`${channel}:${code}`) ?? [];
+              return [
+                code,
+                {
+                  ...template,
+                  categoria: [
+                    ...new Set(taxonomyPairs.map(({ category }) => category)),
+                  ],
+                  subcategoria: [
+                    ...new Set(
+                      taxonomyPairs.map(({ subcategory }) => subcategory),
+                    ),
+                  ],
+                  taxonomyPairs,
+                },
+              ];
+            }),
           ),
         ];
       }),
@@ -3064,8 +3034,8 @@ export class RepoService {
   }
 
   private invalidateFiltersCache() {
-    this.taxonomyCache = undefined;
-    this.taxonomyGeneration += 1;
+    // Kept as the mutation hook for callers. Taxonomy reads intentionally do
+    // not use a process-local cache; see taxonomy().
   }
 
   private async saveSnapshot(key: string, payload: unknown) {

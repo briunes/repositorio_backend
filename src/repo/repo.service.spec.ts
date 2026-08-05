@@ -1,6 +1,35 @@
 import { RepoService } from './repo.service';
 
 describe('RepoService taxonomy visibility', () => {
+  it('reads taxonomy from the shared database on every request', async () => {
+    const rpc = jest
+      .fn()
+      .mockResolvedValueOnce({
+        data: { categories: [{ id: 'deleted' }], subcategories: [] },
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        data: { categories: [], subcategories: [] },
+        error: null,
+      });
+    const service = new RepoService(
+      { get: jest.fn() } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { client: { rpc } } as never,
+      {} as never,
+    );
+
+    await expect(service.taxonomy()).resolves.toMatchObject({
+      data: { categories: [{ id: 'deleted' }] },
+    });
+    await expect(service.taxonomy()).resolves.toMatchObject({
+      data: { categories: [] },
+    });
+    expect(rpc).toHaveBeenCalledTimes(2);
+  });
+
   it('removes inactive taxonomy from template metadata and taxonomy pairs', async () => {
     const prisma = {
       communicationSubcategory: {
@@ -14,12 +43,6 @@ describe('RepoService taxonomy visibility', () => {
             },
           },
         ]),
-      },
-      category: {
-        findMany: jest.fn().mockResolvedValue([{ name: 'Onboarding' }]),
-      },
-      subcategory: {
-        findMany: jest.fn().mockResolvedValue([{ name: 'Adesão' }]),
       },
     };
     const service = new RepoService(
@@ -59,5 +82,37 @@ describe('RepoService taxonomy visibility', () => {
         },
       }),
     );
+  });
+
+  it('does not revive a deleted assignment when its category name is reused', async () => {
+    const prisma = {
+      communicationSubcategory: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+    const service = new RepoService(
+      { get: jest.fn() } as never,
+      prisma as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+
+    const result = await (
+      service as unknown as {
+        enrichTemplatesWithTaxonomyPairs: (templates: unknown) => Promise<{
+          SMS: Record<string, Record<string, unknown>>;
+        }>;
+      }
+    ).enrichTemplatesWithTaxonomyPairs({
+      SMS: {
+        WELCOME: { categoria: ['tom'], subcategoria: ['Adesão'] },
+      },
+    });
+
+    expect(result.SMS.WELCOME).toMatchObject({
+      categoria: [],
+      subcategoria: [],
+      taxonomyPairs: [],
+    });
   });
 });
