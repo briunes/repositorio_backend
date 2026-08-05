@@ -32,10 +32,6 @@ type TaxonomyData = {
 export class RepoService {
   private readonly baseUrl?: string;
   private templatesCache?: { data: GboxTemplates; expiresAt: number };
-  private filtersCache?: { data: JsonObject; expiresAt: number };
-  private taxonomyCache?: { data: TaxonomyData; expiresAt: number };
-  private taxonomyRefresh?: Promise<{ data: TaxonomyData; generation: number }>;
-  private taxonomyGeneration = 0;
 
   constructor(
     config: ConfigService,
@@ -538,10 +534,6 @@ export class RepoService {
   }
 
   async filters() {
-    if (this.filtersCache && this.filtersCache.expiresAt > Date.now()) {
-      return { status: true, data: this.filtersCache.data };
-    }
-
     // One round trip is important on serverless deployments, where Prisma is
     // intentionally limited to one pooled connection per function instance.
     const [row] = await this.prisma.$queryRaw<Array<{ data: JsonObject }>>`
@@ -583,8 +575,6 @@ export class RepoService {
       ) AS data
     `;
     const data = row?.data ?? {};
-    this.filtersCache = { data, expiresAt: Date.now() + 5 * 60_000 };
-
     return {
       status: true,
       data,
@@ -592,28 +582,13 @@ export class RepoService {
   }
 
   async taxonomy() {
-    if (this.taxonomyCache && this.taxonomyCache.expiresAt > Date.now()) {
-      markRequestCache('hit');
-      return { status: true, data: this.taxonomyCache.data };
-    }
-
+    // Taxonomy is mutable administrative data. A process-local cache cannot be
+    // invalidated reliably when production runs more than one API instance:
+    // the instance handling a write has no way to clear the other instances.
+    // Always read the shared database so a successful mutation is immediately
+    // visible regardless of which instance serves the next request.
     markRequestCache('miss');
-    if (!this.taxonomyRefresh) {
-      const generation = this.taxonomyGeneration;
-      this.taxonomyRefresh = this.loadTaxonomy().then((data) => ({
-        data,
-        generation,
-      }));
-    }
-    try {
-      const { data, generation } = await this.taxonomyRefresh;
-      if (generation === this.taxonomyGeneration) {
-        this.taxonomyCache = { data, expiresAt: Date.now() + 5 * 60_000 };
-      }
-      return { status: true, data };
-    } finally {
-      this.taxonomyRefresh = undefined;
-    }
+    return { status: true, data: await this.loadTaxonomy() };
   }
 
   private async loadTaxonomy(): Promise<TaxonomyData> {
@@ -2937,6 +2912,10 @@ export class RepoService {
     templates: GboxTemplates,
   ): Promise<GboxTemplates> {
     const assignments = await this.prisma.communicationSubcategory.findMany({
+      where: {
+        category: { isActive: true },
+        subcategory: { isActive: true },
+      },
       select: {
         category: { select: { name: true } },
         subcategory: { select: { name: true } },
@@ -2970,14 +2949,25 @@ export class RepoService {
         return [
           channel,
           Object.fromEntries(
-            Object.entries(channelTemplates).map(([code, template]) => [
-              code,
-              {
-                ...template,
-                taxonomyPairs:
-                  pairsByCommunication.get(`${channel}:${code}`) ?? [],
-              },
-            ]),
+            Object.entries(channelTemplates).map(([code, template]) => {
+              const taxonomyPairs =
+                pairsByCommunication.get(`${channel}:${code}`) ?? [];
+              return [
+                code,
+                {
+                  ...template,
+                  categoria: [
+                    ...new Set(taxonomyPairs.map(({ category }) => category)),
+                  ],
+                  subcategoria: [
+                    ...new Set(
+                      taxonomyPairs.map(({ subcategory }) => subcategory),
+                    ),
+                  ],
+                  taxonomyPairs,
+                },
+              ];
+            }),
           ),
         ];
       }),
@@ -2992,7 +2982,12 @@ export class RepoService {
     if (!categoryId || !subcategoryId) return templates;
 
     const assignments = await this.prisma.communicationSubcategory.findMany({
-      where: { categoryId, subcategoryId },
+      where: {
+        categoryId,
+        subcategoryId,
+        category: { isActive: true },
+        subcategory: { isActive: true },
+      },
       select: {
         communication: {
           select: {
@@ -3039,9 +3034,8 @@ export class RepoService {
   }
 
   private invalidateFiltersCache() {
-    this.filtersCache = undefined;
-    this.taxonomyCache = undefined;
-    this.taxonomyGeneration += 1;
+    // Kept as the mutation hook for callers. Taxonomy reads intentionally do
+    // not use a process-local cache; see taxonomy().
   }
 
   private async saveSnapshot(key: string, payload: unknown) {
