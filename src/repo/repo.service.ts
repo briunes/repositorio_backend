@@ -32,9 +32,6 @@ type TaxonomyData = {
 export class RepoService {
   private readonly baseUrl?: string;
   private templatesCache?: { data: GboxTemplates; expiresAt: number };
-  private taxonomyCache?: { data: TaxonomyData; expiresAt: number };
-  private taxonomyRefresh?: Promise<{ data: TaxonomyData; generation: number }>;
-  private taxonomyGeneration = 0;
 
   constructor(
     config: ConfigService,
@@ -585,28 +582,13 @@ export class RepoService {
   }
 
   async taxonomy() {
-    if (this.taxonomyCache && this.taxonomyCache.expiresAt > Date.now()) {
-      markRequestCache('hit');
-      return { status: true, data: this.taxonomyCache.data };
-    }
-
+    // Taxonomy is mutable administrative data. A process-local cache cannot be
+    // invalidated reliably when production runs more than one API instance:
+    // the instance handling a write has no way to clear the other instances.
+    // Always read the shared database so a successful mutation is immediately
+    // visible regardless of which instance serves the next request.
     markRequestCache('miss');
-    if (!this.taxonomyRefresh) {
-      const generation = this.taxonomyGeneration;
-      this.taxonomyRefresh = this.loadTaxonomy().then((data) => ({
-        data,
-        generation,
-      }));
-    }
-    try {
-      const { data, generation } = await this.taxonomyRefresh;
-      if (generation === this.taxonomyGeneration) {
-        this.taxonomyCache = { data, expiresAt: Date.now() + 5 * 60_000 };
-      }
-      return { status: true, data };
-    } finally {
-      this.taxonomyRefresh = undefined;
-    }
+    return { status: true, data: await this.loadTaxonomy() };
   }
 
   private async loadTaxonomy(): Promise<TaxonomyData> {
@@ -3052,8 +3034,8 @@ export class RepoService {
   }
 
   private invalidateFiltersCache() {
-    this.taxonomyCache = undefined;
-    this.taxonomyGeneration += 1;
+    // Kept as the mutation hook for callers. Taxonomy reads intentionally do
+    // not use a process-local cache; see taxonomy().
   }
 
   private async saveSnapshot(key: string, payload: unknown) {

@@ -1,6 +1,35 @@
 import { RepoService } from './repo.service';
 
 describe('RepoService taxonomy visibility', () => {
+  it('reads taxonomy from the shared database on every request', async () => {
+    const rpc = jest
+      .fn()
+      .mockResolvedValueOnce({
+        data: { categories: [{ id: 'deleted' }], subcategories: [] },
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        data: { categories: [], subcategories: [] },
+        error: null,
+      });
+    const service = new RepoService(
+      { get: jest.fn() } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { client: { rpc } } as never,
+      {} as never,
+    );
+
+    await expect(service.taxonomy()).resolves.toMatchObject({
+      data: { categories: [{ id: 'deleted' }] },
+    });
+    await expect(service.taxonomy()).resolves.toMatchObject({
+      data: { categories: [] },
+    });
+    expect(rpc).toHaveBeenCalledTimes(2);
+  });
+
   it('removes inactive taxonomy from template metadata and taxonomy pairs', async () => {
     const prisma = {
       communicationSubcategory: {
