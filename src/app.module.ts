@@ -11,6 +11,10 @@ import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { RequestTimingInterceptor } from './database/request-timing.interceptor';
 import { AppAuthGuard } from './auth/app-auth.guard';
 import { AppTokenService } from './auth/app-token.service';
+import { PermissionGuard } from './auth/permission.guard';
+import { TeamsModule } from './teams/teams.module';
+import { WorkflowModule } from './workflow/workflow.module';
+import { NotificationsModule } from './notifications/notifications.module';
 
 @Module({
   imports: [
@@ -20,12 +24,16 @@ import { AppTokenService } from './auth/app-token.service';
     RepoModule,
     VersionModule,
     AdminModule,
+    TeamsModule,
+    WorkflowModule,
+    NotificationsModule,
   ],
   controllers: [AppController],
   providers: [
     AppService,
     AppTokenService,
     { provide: APP_GUARD, useClass: AppAuthGuard },
+    { provide: APP_GUARD, useClass: PermissionGuard },
     { provide: APP_INTERCEPTOR, useClass: RequestTimingInterceptor },
   ],
 })

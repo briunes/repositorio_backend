@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import { AdminService } from './admin.service';
 import { AdminAccessGuard } from './admin-access.guard';
+import { TeamMemberRole } from '@prisma/client';
 
 @Controller('admin')
 @UseGuards(AdminAccessGuard)
@@ -38,6 +39,23 @@ export class AdminController {
     @Body() body: { roleIds?: string[] },
   ) {
     return this.admin.updateUserRoles(id, body.roleIds);
+  }
+
+  @Put('users/:id/team')
+  updateUserTeam(
+    @Param('id') id: string,
+    @Body() body: { teamId?: string | null; role?: TeamMemberRole },
+  ) {
+    return this.admin.updateUserTeam(id, body.teamId, body.role);
+  }
+
+  @Patch('users/:id')
+  updateUser(
+    @Param('id') id: string,
+    @Body()
+    body: { name?: string; avatarUrl?: string | null },
+  ) {
+    return this.admin.updateUser(id, body);
   }
 
   @Post('roles')

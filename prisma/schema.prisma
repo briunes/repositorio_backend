@@ -23,10 +23,77 @@ enum CommunicationStatus {
 
 enum VersionStatus {
   DRAFT
+  IN_REVIEW
+  CHANGES_REQUESTED
+  APPROVED
   PENDING
   SCHEDULED
+  DEPLOYING
+  DEPLOYED
+  DEPLOY_FAILED
+  REJECTED
+  CANCELLED
   PUBLISHED
   ARCHIVED
+}
+
+enum TeamMemberRole {
+  VIEWER
+  EDITOR
+  APPROVER
+  PUBLISHER
+  OWNER
+}
+
+enum ApprovalOutcome {
+  PENDING
+  APPROVED
+  CHANGES_REQUESTED
+  REJECTED
+  WITHDRAWN
+  EXPIRED
+}
+
+enum ApprovalDecisionType {
+  APPROVE
+  REQUEST_CHANGES
+  REJECT
+}
+
+enum DeploymentStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum DeploymentTrigger {
+  IMMEDIATE
+  SCHEDULED
+  RETRY
+  ROLLBACK
+}
+
+enum NotificationType {
+  VERSION_SUBMITTED
+  VERSION_APPROVED
+  CHANGES_REQUESTED
+  VERSION_REJECTED
+  DEPLOYMENT_SCHEDULED
+  DEPLOYMENT_RESCHEDULED
+  DEPLOYMENT_CANCELLED
+  DEPLOYMENT_SUCCEEDED
+  DEPLOYMENT_FAILED
+  TEAM_MEMBERSHIP_CHANGED
+  OWNERSHIP_CHANGED
+}
+
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  PROCESSED
+  FAILED
 }
 
 enum AuditAction {
@@ -38,6 +105,19 @@ enum AuditAction {
   LOGIN
   LOGOUT
   SYNC
+  SUBMIT
+  WITHDRAW
+  APPROVE
+  REQUEST_CHANGES
+  REJECT
+  SCHEDULE
+  DEPLOY
+  DEPLOY_FAILED
+  RETRY
+  CANCEL
+  TRANSFER
+  ASSIGN
+  UNASSIGN
 }
 
 enum SyncStatus {
@@ -48,26 +128,32 @@ enum SyncStatus {
 
 /// Minimal local profile. Authentication remains the responsibility of GBox.
 model User {
-  id              String                 @id @default(cuid())
-  gboxUserId      String?                @unique @map("gbox_user_id")
-  username        String                 @unique @db.VarChar(100)
-  displayName     String?                @map("display_name") @db.VarChar(160)
-  email           String?                @unique @db.VarChar(254)
-  avatarUrl       String?                @map("avatar_url") @db.Text
-  theme           String                 @default("light") @db.VarChar(20)
-  tableDensity    String                 @default("comfortable") @map("table_density") @db.VarChar(20)
-  language        String                 @default("pt-PT") @db.VarChar(10)
-  dateFormat      String                 @default("dd/MM/yyyy") @map("date_format") @db.VarChar(20)
-  timeZone        String                 @default("Europe/Lisbon") @map("time_zone") @db.VarChar(80)
-  status          UserStatus             @default(ACTIVE)
-  lastLoginAt     DateTime?              @map("last_login_at")
-  createdAt       DateTime               @default(now()) @map("created_at")
-  updatedAt       DateTime               @updatedAt @map("updated_at")
-  roles           UserRole[]
-  favourites      Favourite[]
-  createdVersions CommunicationVersion[] @relation("VersionCreator")
-  auditLogs       AuditLog[]
-  comments        CommunicationComment[]
+  id                      String                 @id @default(cuid())
+  gboxUserId              String?                @unique @map("gbox_user_id")
+  username                String                 @unique @db.VarChar(100)
+  displayName             String?                @map("display_name") @db.VarChar(160)
+  email                   String?                @unique @db.VarChar(254)
+  avatarUrl               String?                @map("avatar_url") @db.Text
+  theme                   String                 @default("light") @db.VarChar(20)
+  tableDensity            String                 @default("comfortable") @map("table_density") @db.VarChar(20)
+  language                String                 @default("pt-PT") @db.VarChar(10)
+  dateFormat              String                 @default("dd/MM/yyyy") @map("date_format") @db.VarChar(20)
+  timeZone                String                 @default("Europe/Lisbon") @map("time_zone") @db.VarChar(80)
+  status                  UserStatus             @default(ACTIVE)
+  lastLoginAt             DateTime?              @map("last_login_at")
+  createdAt               DateTime               @default(now()) @map("created_at")
+  updatedAt               DateTime               @updatedAt @map("updated_at")
+  roles                   UserRole[]
+  favourites              Favourite[]
+  createdVersions         CommunicationVersion[] @relation("VersionCreator")
+  auditLogs               AuditLog[]
+  comments                CommunicationComment[]
+  teamMemberships         TeamMember[]           @relation("TeamMemberUser")
+  assignedTeamMemberships TeamMember[]           @relation("TeamMemberAssigner")
+  submittedApprovals      ApprovalRequest[]      @relation("ApprovalSubmitter")
+  approvalDecisions       ApprovalDecision[]     @relation("ApprovalReviewer")
+  requestedDeployments    Deployment[]           @relation("DeploymentRequester")
+  notifications           Notification[]
 
   @@index([status])
   @@map("users")
@@ -125,6 +211,7 @@ model Category {
   name           String                     @db.VarChar(120)
   slug           String                     @unique @db.VarChar(140)
   description    String?                    @db.VarChar(500)
+  iconData       String?                    @map("icon_data") @db.Text
   sortOrder      Int                        @default(0) @map("sort_order")
   isActive       Boolean                    @default(true) @map("is_active")
   subcategories  CategorySubcategory[]
@@ -178,15 +265,40 @@ model Channel {
 }
 
 model Team {
-  id             String              @id @default(cuid())
-  name           String              @unique @db.VarChar(120)
-  slug           String              @unique @db.VarChar(140)
-  isActive       Boolean             @default(true) @map("is_active")
-  communications CommunicationTeam[]
-  createdAt      DateTime            @default(now()) @map("created_at")
-  updatedAt      DateTime            @updatedAt @map("updated_at")
+  id                          String                          @id @default(cuid())
+  name                        String                          @unique @db.VarChar(120)
+  slug                        String                          @unique @db.VarChar(140)
+  isActive                    Boolean                         @default(true) @map("is_active")
+  communications              CommunicationTeam[]
+  description                 String?                         @db.VarChar(500)
+  members                     TeamMember[]
+  ownedCommunications         Communication[]                 @relation("CommunicationOwnerTeam")
+  collaboratingCommunications CommunicationCollaboratorTeam[]
+  requiredApprovals           Int                             @default(1) @map("required_approvals")
+  allowSelfApproval           Boolean                         @default(false) @map("allow_self_approval")
+  approvalExpiresDays         Int?                            @default(30) @map("approval_expires_days")
+  createdAt                   DateTime                        @default(now()) @map("created_at")
+  updatedAt                   DateTime                        @updatedAt @map("updated_at")
 
   @@map("teams")
+}
+
+model TeamMember {
+  id           String         @id @default(cuid())
+  teamId       String         @map("team_id")
+  userId       String         @map("user_id")
+  role         TeamMemberRole
+  assignedById String?        @map("assigned_by_id")
+  assignedAt   DateTime       @default(now()) @map("assigned_at")
+  expiresAt    DateTime?      @map("expires_at")
+  team         Team           @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user         User           @relation("TeamMemberUser", fields: [userId], references: [id], onDelete: Cascade)
+  assignedBy   User?          @relation("TeamMemberAssigner", fields: [assignedById], references: [id], onDelete: SetNull)
+
+  @@unique([teamId, userId, role])
+  @@index([userId, role])
+  @@index([teamId, role])
+  @@map("team_members")
 }
 
 model Service {
@@ -212,33 +324,38 @@ model Tag {
 }
 
 model Communication {
-  id             String                     @id @default(cuid())
-  code           String                     @db.VarChar(120)
-  name           String                     @db.VarChar(255)
-  description    String?                    @db.Text
-  status         CommunicationStatus        @default(ACTIVE)
-  channelId      String                     @map("channel_id")
-  sourceSystem   String?                    @map("source_system") @db.VarChar(60)
-  sourceId       String?                    @map("source_id") @db.VarChar(191)
-  templateFolder String?                    @map("template_folder") @db.VarChar(500)
-  metadata       Json?
-  lastSyncedAt   DateTime?                  @map("last_synced_at")
-  publishedAt    DateTime?                  @map("published_at")
-  archivedAt     DateTime?                  @map("archived_at")
-  createdAt      DateTime                   @default(now()) @map("created_at")
-  updatedAt      DateTime                   @updatedAt @map("updated_at")
-  channel        Channel                    @relation(fields: [channelId], references: [id], onDelete: Restrict)
-  versions       CommunicationVersion[]
-  subcategories  CommunicationSubcategory[]
-  services       CommunicationService[]
-  teams          CommunicationTeam[]
-  tags           CommunicationTag[]
-  favourites     Favourite[]
-  comments       CommunicationComment[]
+  id                String                          @id @default(cuid())
+  code              String                          @db.VarChar(120)
+  name              String                          @db.VarChar(255)
+  description       String?                         @db.Text
+  status            CommunicationStatus             @default(ACTIVE)
+  channelId         String                          @map("channel_id")
+  ownerTeamId       String?                         @map("owner_team_id")
+  sourceSystem      String?                         @map("source_system") @db.VarChar(60)
+  sourceId          String?                         @map("source_id") @db.VarChar(191)
+  templateFolder    String?                         @map("template_folder") @db.VarChar(500)
+  metadata          Json?
+  lastSyncedAt      DateTime?                       @map("last_synced_at")
+  publishedAt       DateTime?                       @map("published_at")
+  archivedAt        DateTime?                       @map("archived_at")
+  createdAt         DateTime                        @default(now()) @map("created_at")
+  updatedAt         DateTime                        @updatedAt @map("updated_at")
+  channel           Channel                         @relation(fields: [channelId], references: [id], onDelete: Restrict)
+  ownerTeam         Team?                           @relation("CommunicationOwnerTeam", fields: [ownerTeamId], references: [id], onDelete: Restrict)
+  versions          CommunicationVersion[]
+  subcategories     CommunicationSubcategory[]
+  services          CommunicationService[]
+  teams             CommunicationTeam[]
+  tags              CommunicationTag[]
+  favourites        Favourite[]
+  comments          CommunicationComment[]
+  collaboratorTeams CommunicationCollaboratorTeam[]
+  activeVersions    CommunicationActiveVersion[]
 
   @@unique([channelId, code])
   @@unique([sourceSystem, sourceId])
   @@index([status, updatedAt])
+  @@index([ownerTeamId, status])
   @@index([name])
   @@map("communications")
 }
@@ -271,26 +388,138 @@ model RepositorySnapshot {
 }
 
 model CommunicationVersion {
-  id              String                      @id @default(cuid())
-  communicationId String                      @map("communication_id")
-  version         String                      @db.VarChar(60)
-  status          VersionStatus               @default(DRAFT)
-  effectiveAt     DateTime?                   @map("effective_at")
-  publishedAt     DateTime?                   @map("published_at")
-  createdById     String?                     @map("created_by_id")
-  sourceTicketId  String?                     @map("source_ticket_id") @db.VarChar(100)
-  metadata        Json?
-  createdAt       DateTime                    @default(now()) @map("created_at")
-  updatedAt       DateTime                    @updatedAt @map("updated_at")
-  communication   Communication               @relation(fields: [communicationId], references: [id], onDelete: Cascade)
-  createdBy       User?                       @relation("VersionCreator", fields: [createdById], references: [id], onDelete: SetNull)
-  localizations   CommunicationLocalization[]
-  variables       CommunicationVariable[]
+  id                 String                       @id @default(cuid())
+  communicationId    String                       @map("communication_id")
+  version            String                       @db.VarChar(60)
+  status             VersionStatus                @default(DRAFT)
+  effectiveAt        DateTime?                    @map("effective_at")
+  publishedAt        DateTime?                    @map("published_at")
+  createdById        String?                      @map("created_by_id")
+  sourceVersionId    String?                      @map("source_version_id")
+  revision           Int?
+  externalVersion    String?                      @map("external_version") @db.VarChar(60)
+  changeSummary      String?                      @map("change_summary") @db.VarChar(1000)
+  contentChecksum    String?                      @map("content_checksum") @db.VarChar(128)
+  submittedAt        DateTime?                    @map("submitted_at")
+  approvedAt         DateTime?                    @map("approved_at")
+  cancelledAt        DateTime?                    @map("cancelled_at")
+  cancellationReason String?                      @map("cancellation_reason") @db.VarChar(1000)
+  sourceTicketId     String?                      @map("source_ticket_id") @db.VarChar(100)
+  metadata           Json?
+  createdAt          DateTime                     @default(now()) @map("created_at")
+  updatedAt          DateTime                     @updatedAt @map("updated_at")
+  communication      Communication                @relation(fields: [communicationId], references: [id], onDelete: Cascade)
+  createdBy          User?                        @relation("VersionCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  sourceVersion      CommunicationVersion?        @relation("VersionCopies", fields: [sourceVersionId], references: [id], onDelete: SetNull)
+  copiedVersions     CommunicationVersion[]       @relation("VersionCopies")
+  localizations      CommunicationLocalization[]
+  variables          CommunicationVariable[]
+  approvalRequests   ApprovalRequest[]
+  deployments        Deployment[]
+  activeFor          CommunicationActiveVersion[]
+  comments           CommunicationComment[]
 
   @@unique([communicationId, version])
+  @@unique([communicationId, revision])
   @@index([status, effectiveAt])
   @@index([createdById])
   @@map("communication_versions")
+}
+
+model CommunicationCollaboratorTeam {
+  communicationId String        @map("communication_id")
+  teamId          String        @map("team_id")
+  communication   Communication @relation(fields: [communicationId], references: [id], onDelete: Cascade)
+  team            Team          @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  createdAt       DateTime      @default(now()) @map("created_at")
+
+  @@id([communicationId, teamId])
+  @@index([teamId])
+  @@map("communication_collaborator_teams")
+}
+
+model ApprovalRequest {
+  id                String               @id @default(cuid())
+  versionId         String               @map("version_id")
+  cycle             Int
+  outcome           ApprovalOutcome      @default(PENDING)
+  submittedById     String               @map("submitted_by_id")
+  submittedAt       DateTime             @default(now()) @map("submitted_at")
+  resolvedAt        DateTime?            @map("resolved_at")
+  expiresAt         DateTime?            @map("expires_at")
+  changeSummary     String               @map("change_summary") @db.VarChar(1000)
+  contentChecksum   String               @map("content_checksum") @db.VarChar(128)
+  requiredApprovals Int                  @default(1) @map("required_approvals")
+  version           CommunicationVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  submittedBy       User                 @relation("ApprovalSubmitter", fields: [submittedById], references: [id], onDelete: Restrict)
+  decisions         ApprovalDecision[]
+
+  @@unique([versionId, cycle])
+  @@index([outcome, submittedAt])
+  @@index([submittedById, submittedAt])
+  @@map("approval_requests")
+}
+
+model ApprovalDecision {
+  id                String               @id @default(cuid())
+  approvalRequestId String               @map("approval_request_id")
+  reviewerId        String               @map("reviewer_id")
+  decision          ApprovalDecisionType
+  comment           String?              @db.VarChar(2000)
+  createdAt         DateTime             @default(now()) @map("created_at")
+  approvalRequest   ApprovalRequest      @relation(fields: [approvalRequestId], references: [id], onDelete: Cascade)
+  reviewer          User                 @relation("ApprovalReviewer", fields: [reviewerId], references: [id], onDelete: Restrict)
+
+  @@index([approvalRequestId, createdAt])
+  @@index([reviewerId, createdAt])
+  @@map("approval_decisions")
+}
+
+model Deployment {
+  id                     String               @id @default(cuid())
+  versionId              String               @map("version_id")
+  requestedById          String?              @map("requested_by_id")
+  targetEnvironment      String               @map("target_environment") @db.VarChar(80)
+  targetSystem           String               @map("target_system") @db.VarChar(80)
+  status                 DeploymentStatus     @default(QUEUED)
+  trigger                DeploymentTrigger
+  scheduledAt            DateTime?            @map("scheduled_at")
+  requestedAt            DateTime             @default(now()) @map("requested_at")
+  startedAt              DateTime?            @map("started_at")
+  completedAt            DateTime?            @map("completed_at")
+  attempt                Int                  @default(1)
+  idempotencyKey         String               @unique @map("idempotency_key") @db.VarChar(191)
+  externalReference      String?              @map("external_reference") @db.VarChar(191)
+  requestSummary         Json?                @map("request_summary")
+  responseSummary        Json?                @map("response_summary")
+  errorCode              String?              @map("error_code") @db.VarChar(120)
+  errorMessage           String?              @map("error_message") @db.VarChar(1000)
+  retryOfId              String?              @map("retry_of_id")
+  rollbackOfDeploymentId String?              @map("rollback_of_deployment_id")
+  version                CommunicationVersion @relation(fields: [versionId], references: [id], onDelete: Restrict)
+  requestedBy            User?                @relation("DeploymentRequester", fields: [requestedById], references: [id], onDelete: SetNull)
+  retryOf                Deployment?          @relation("DeploymentRetries", fields: [retryOfId], references: [id], onDelete: SetNull)
+  retries                Deployment[]         @relation("DeploymentRetries")
+  rollbackOf             Deployment?          @relation("DeploymentRollbacks", fields: [rollbackOfDeploymentId], references: [id], onDelete: SetNull)
+  rollbacks              Deployment[]         @relation("DeploymentRollbacks")
+
+  @@index([status, scheduledAt])
+  @@index([versionId, requestedAt])
+  @@index([requestedById, requestedAt])
+  @@map("deployments")
+}
+
+model CommunicationActiveVersion {
+  communicationId   String               @map("communication_id")
+  targetEnvironment String               @map("target_environment") @db.VarChar(80)
+  versionId         String               @map("version_id")
+  activatedAt       DateTime             @default(now()) @map("activated_at")
+  communication     Communication        @relation(fields: [communicationId], references: [id], onDelete: Cascade)
+  version           CommunicationVersion @relation(fields: [versionId], references: [id], onDelete: Restrict)
+
+  @@id([communicationId, targetEnvironment])
+  @@index([versionId])
+  @@map("communication_active_versions")
 }
 
 model CommunicationLocalization {
@@ -387,18 +616,61 @@ model Favourite {
 }
 
 model CommunicationComment {
-  id              String        @id @default(cuid())
-  communicationId String        @map("communication_id")
-  authorId        String        @map("author_id")
-  content         String        @db.Text
-  createdAt       DateTime      @default(now()) @map("created_at")
-  updatedAt       DateTime      @updatedAt @map("updated_at")
-  communication   Communication @relation(fields: [communicationId], references: [id], onDelete: Cascade)
-  author          User          @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  id                String                @id @default(cuid())
+  communicationId   String                @map("communication_id")
+  authorId          String                @map("author_id")
+  versionId         String?               @map("version_id")
+  approvalRequestId String?               @map("approval_request_id")
+  commentType       String                @default("GENERAL") @map("comment_type") @db.VarChar(40)
+  content           String                @db.Text
+  createdAt         DateTime              @default(now()) @map("created_at")
+  updatedAt         DateTime              @updatedAt @map("updated_at")
+  communication     Communication         @relation(fields: [communicationId], references: [id], onDelete: Cascade)
+  author            User                  @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  version           CommunicationVersion? @relation(fields: [versionId], references: [id], onDelete: Cascade)
 
   @@index([communicationId, createdAt])
   @@index([authorId, createdAt])
+  @@index([versionId, createdAt])
+  @@index([approvalRequestId, createdAt])
   @@map("communication_comments")
+}
+
+model Notification {
+  id            String           @id @default(cuid())
+  recipientId   String           @map("recipient_id")
+  type          NotificationType
+  title         String           @db.VarChar(180)
+  message       String           @db.VarChar(1000)
+  entityType    String           @map("entity_type") @db.VarChar(80)
+  entityId      String           @map("entity_id") @db.VarChar(191)
+  actionUrl     String?          @map("action_url") @db.VarChar(500)
+  readAt        DateTime?        @map("read_at")
+  createdAt     DateTime         @default(now()) @map("created_at")
+  outboxEventId String?          @map("outbox_event_id")
+  recipient     User             @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@unique([recipientId, outboxEventId])
+  @@index([recipientId, readAt, createdAt])
+  @@map("notifications")
+}
+
+model OutboxEvent {
+  id            String       @id @default(cuid())
+  eventType     String       @map("event_type") @db.VarChar(120)
+  aggregateType String       @map("aggregate_type") @db.VarChar(80)
+  aggregateId   String       @map("aggregate_id") @db.VarChar(191)
+  payload       Json
+  status        OutboxStatus @default(PENDING)
+  attempts      Int          @default(0)
+  availableAt   DateTime     @default(now()) @map("available_at")
+  processedAt   DateTime?    @map("processed_at")
+  lastError     String?      @map("last_error") @db.VarChar(1000)
+  createdAt     DateTime     @default(now()) @map("created_at")
+
+  @@index([status, availableAt])
+  @@index([aggregateType, aggregateId, createdAt])
+  @@map("outbox_events")
 }
 
 model AuditLog {
@@ -430,6 +702,8 @@ model SystemConfig {
   maintenanceMode        Boolean  @default(false) @map("maintenance_mode")
   readOnlyMode           Boolean  @default(false) @map("read_only_mode")
   fullSmsEditingEnabled  Boolean  @default(false) @map("full_sms_editing_enabled")
+  myWorkEnabled          Boolean  @default(true) @map("my_work_enabled")
+  notificationsEnabled   Boolean  @default(true) @map("notifications_enabled")
   maintenanceMessage     String?  @map("maintenance_message") @db.VarChar(500)
   environmentName        String   @default("Produção") @map("environment_name") @db.VarChar(80)
   updatedAt              DateTime @updatedAt @map("updated_at")
@@ -438,16 +712,16 @@ model SystemConfig {
 }
 
 model ReleaseNote {
-  id          String   @id @default(cuid())
-  version     String   @unique @db.VarChar(40)
-  title       String   @db.VarChar(180)
-  summary     String   @db.VarChar(600)
-  heroImageUrl String? @map("hero_image_url") @db.Text
-  blocks      Json
-  published   Boolean  @default(false)
-  publishedAt DateTime? @map("published_at")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id           String    @id @default(cuid())
+  version      String    @unique @db.VarChar(40)
+  title        String    @db.VarChar(180)
+  summary      String    @db.VarChar(600)
+  heroImageUrl String?   @map("hero_image_url") @db.Text
+  blocks       Json
+  published    Boolean   @default(false)
+  publishedAt  DateTime? @map("published_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
 
   @@index([published, publishedAt])
   @@map("release_notes")

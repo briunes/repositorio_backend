@@ -23,6 +23,8 @@
     "db:deploy": "prisma migrate deploy",
     "db:seed": "prisma db seed",
     "db:import:gbox": "ts-node prisma/import-gbox-snapshot.ts",
+    "db:ownership:report": "ts-node scripts/backfill-communication-ownership.ts",
+    "db:ownership:apply": "ts-node scripts/backfill-communication-ownership.ts --apply",
     "db:studio": "prisma studio",
     "app:version": "ts-node scripts/set-app-version.ts"
   },

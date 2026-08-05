@@ -100,21 +100,56 @@ export class RepoService {
     };
   }
 
+  async userContext(gboxUserId?: string) {
+    if (!gboxUserId) throw new UnauthorizedException('User is required.');
+    const user = await this.prisma.user.findUnique({
+      where: { gboxUserId },
+      select: {
+        username: true,
+        displayName: true,
+        email: true,
+        avatarUrl: true,
+        theme: true,
+        tableDensity: true,
+        language: true,
+        dateFormat: true,
+        timeZone: true,
+        roles: {
+          select: { role: { select: { key: true } } },
+        },
+      },
+    });
+    if (!user) throw new NotFoundException('User profile was not found.');
+
+    return {
+      status: true,
+      data: {
+        profile: {
+          username: user.username,
+          displayName: user.displayName,
+          email: user.email,
+          avatarUrl: user.avatarUrl,
+          isAdmin: user.roles.some(({ role }) => role.key === 'admin'),
+        },
+        preferences: {
+          theme: user.theme,
+          tableDensity: user.tableDensity,
+          language: user.language,
+          dateFormat: user.dateFormat,
+          timeZone: user.timeZone,
+        },
+      },
+    };
+  }
+
   async updateProfile(
     gboxUserId: string | undefined,
-    body: { name?: string; email?: string | null; avatarUrl?: string | null },
+    body: { name?: string; avatarUrl?: string | null },
   ) {
     if (!gboxUserId) throw new UnauthorizedException('User is required.');
     const name = body.name?.trim();
     if (!name) throw new BadRequestException('Name is required.');
     if (name.length > 160) throw new BadRequestException('Name is too long.');
-    const email = body.email?.trim() || null;
-    if (
-      email &&
-      (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
-    ) {
-      throw new BadRequestException('Email is invalid.');
-    }
     const avatarUrl = body.avatarUrl?.trim() || null;
     if (
       avatarUrl &&
@@ -126,7 +161,7 @@ export class RepoService {
     try {
       const user = await this.prisma.user.update({
         where: { gboxUserId },
-        data: { displayName: name, email, avatarUrl },
+        data: { displayName: name, avatarUrl },
         select: {
           username: true,
           displayName: true,
@@ -136,14 +171,6 @@ export class RepoService {
       });
       return { status: true, data: user };
     } catch (error) {
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2002'
-      ) {
-        throw new ConflictException(
-          'Email is already being used by another user.',
-        );
-      }
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2025'
@@ -251,10 +278,12 @@ export class RepoService {
       );
       return {
         status: true,
-        data: await this.filterTemplatesByTaxonomy(
-          filtered,
-          categoryId,
-          subcategoryId,
+        data: await this.enrichTemplatesWithTaxonomyPairs(
+          await this.filterTemplatesByTaxonomy(
+            filtered,
+            categoryId,
+            subcategoryId,
+          ),
         ),
       };
     }
@@ -269,10 +298,12 @@ export class RepoService {
       const filtered = this.filterTemplatesByActivity(data, activity);
       return {
         status: true,
-        data: await this.filterTemplatesByTaxonomy(
-          filtered,
-          categoryId,
-          subcategoryId,
+        data: await this.enrichTemplatesWithTaxonomyPairs(
+          await this.filterTemplatesByTaxonomy(
+            filtered,
+            categoryId,
+            subcategoryId,
+          ),
         ),
       };
     }
@@ -361,10 +392,12 @@ export class RepoService {
     const filtered = this.filterTemplatesByActivity(data, activity);
     return {
       status: true,
-      data: await this.filterTemplatesByTaxonomy(
-        filtered,
-        categoryId,
-        subcategoryId,
+      data: await this.enrichTemplatesWithTaxonomyPairs(
+        await this.filterTemplatesByTaxonomy(
+          filtered,
+          categoryId,
+          subcategoryId,
+        ),
       ),
     };
   }
@@ -402,6 +435,8 @@ export class RepoService {
         maintenanceMode: true,
         readOnlyMode: true,
         fullSmsEditingEnabled: true,
+        myWorkEnabled: true,
+        notificationsEnabled: true,
         maintenanceMessage: true,
         environmentName: true,
       },
@@ -513,7 +548,7 @@ export class RepoService {
       SELECT json_build_object(
         'categories', COALESCE((
           SELECT json_agg(json_build_object(
-            'id', id, 'name', name, 'slug', slug, 'sortOrder', sort_order
+            'id', id, 'name', name, 'slug', slug, 'iconData', icon_data, 'sortOrder', sort_order
           ) ORDER BY sort_order ASC, name ASC)
           FROM categories WHERE is_active = true
         ), '[]'::json),
@@ -852,11 +887,13 @@ export class RepoService {
       description?: string | null;
       kind?: 'category' | 'subcategory';
       parentId?: string | null;
+      iconData?: string | null;
     },
     userId?: string,
   ) {
     const name = body.name?.trim();
     const description = body.description?.trim() || null;
+    const iconData = this.validatedCategoryIcon(body.iconData);
     if (!name) throw new BadRequestException('O nome é obrigatório.');
     if (description && description.length > 500)
       throw new BadRequestException(
@@ -937,16 +974,17 @@ export class RepoService {
     const item = await this.prisma.category.create({
       data: {
         name,
+        iconData,
         slug: `${this.slug(name)}-${Date.now().toString(36)}`,
         sortOrder,
       },
-      select: { id: true, name: true, sortOrder: true },
+      select: { id: true, name: true, iconData: true, sortOrder: true },
     });
     await this.writeTaxonomyAudit(
       'CREATE',
       'category',
       item.id,
-      { name },
+      { name, iconChanged: Boolean(iconData) },
       userId,
     );
     this.invalidateFiltersCache();
@@ -959,11 +997,13 @@ export class RepoService {
       name?: string;
       description?: string | null;
       kind?: 'category' | 'subcategory';
+      iconData?: string | null;
     },
     userId?: string,
   ) {
     const name = body.name?.trim();
     const description = body.description?.trim() || null;
+    const iconData = this.validatedCategoryIcon(body.iconData);
     if (!name) throw new BadRequestException('O nome é obrigatório.');
     if (description && description.length > 500)
       throw new BadRequestException(
@@ -1014,7 +1054,7 @@ export class RepoService {
     }
     const current = await this.prisma.category.findFirst({
       where: { id, isActive: true },
-      select: { name: true },
+      select: { name: true, iconData: true },
     });
     if (!current) throw new NotFoundException('Categoria não encontrada.');
     const duplicate = await this.prisma.category.findFirst({
@@ -1027,16 +1067,21 @@ export class RepoService {
     });
     if (duplicate)
       throw new ConflictException('Já existe uma categoria com este nome.');
+    const nextIconData = iconData === undefined ? current.iconData : iconData;
     const item = await this.prisma.category.update({
       where: { id },
-      data: { name },
-      select: { id: true, name: true, sortOrder: true },
+      data: { name, iconData: nextIconData },
+      select: { id: true, name: true, iconData: true, sortOrder: true },
     });
     await this.writeTaxonomyAudit(
       'UPDATE',
       'category',
       id,
-      { oldName: current.name, name },
+      {
+        oldName: current.name,
+        name,
+        iconChanged: current.iconData !== nextIconData,
+      },
       userId,
     );
     this.invalidateFiltersCache();
@@ -1401,6 +1446,7 @@ export class RepoService {
     type: string,
     code: string,
     query: {
+      version?: string;
       page?: string;
       pageSize?: string;
       authorId?: string;
@@ -1409,6 +1455,15 @@ export class RepoService {
     } = {},
   ) {
     const communication = await this.resolveCommunication(type, code);
+    if (!query.version)
+      throw new BadRequestException('A versão da comunicação é obrigatória.');
+    const communicationVersion =
+      await this.prisma.communicationVersion.findFirst({
+        where: { communicationId: communication.id, version: query.version },
+        select: { id: true },
+      });
+    if (!communicationVersion)
+      throw new NotFoundException('Versão da comunicação não encontrada.');
     const parsedPage = Number.parseInt(query.page ?? '1', 10);
     const parsedPageSize = Number.parseInt(query.pageSize ?? '5', 10);
     const page = Number.isFinite(parsedPage) ? Math.max(1, parsedPage) : 1;
@@ -1434,6 +1489,7 @@ export class RepoService {
 
     const where: Prisma.CommunicationCommentWhereInput = {
       communicationId: communication.id,
+      versionId: communicationVersion.id,
       ...(query.authorId ? { authorId: query.authorId } : {}),
       ...(dateFrom || dateToExclusive
         ? {
@@ -1484,7 +1540,7 @@ export class RepoService {
   async createCommunicationComment(
     type: string,
     code: string,
-    body: { content?: string },
+    body: { content?: string; version?: string },
     gboxUserId?: string,
   ) {
     const content = this.commentContent(body.content);
@@ -1492,8 +1548,22 @@ export class RepoService {
       this.resolveCommunication(type, code),
       this.requireCommentAuthor(gboxUserId),
     ]);
+    if (!body.version)
+      throw new BadRequestException('A versão da comunicação é obrigatória.');
+    const communicationVersion =
+      await this.prisma.communicationVersion.findFirst({
+        where: { communicationId: communication.id, version: body.version },
+        select: { id: true },
+      });
+    if (!communicationVersion)
+      throw new NotFoundException('Versão da comunicação não encontrada.');
     const data = await this.prisma.communicationComment.create({
-      data: { communicationId: communication.id, authorId: author.id, content },
+      data: {
+        communicationId: communication.id,
+        versionId: communicationVersion.id,
+        authorId: author.id,
+        content,
+      },
       select: {
         id: true,
         content: true,
@@ -1517,7 +1587,7 @@ export class RepoService {
     type: string,
     code: string,
     commentId: string,
-    body: { content?: string },
+    body: { content?: string; version?: string },
     gboxUserId?: string,
   ) {
     const content = this.commentContent(body.content);
@@ -1525,8 +1595,21 @@ export class RepoService {
       this.resolveCommunication(type, code),
       this.requireCommentAuthor(gboxUserId),
     ]);
+    if (!body.version)
+      throw new BadRequestException('A versão da comunicação é obrigatória.');
+    const communicationVersion =
+      await this.prisma.communicationVersion.findFirst({
+        where: { communicationId: communication.id, version: body.version },
+        select: { id: true },
+      });
+    if (!communicationVersion)
+      throw new NotFoundException('Versão da comunicação não encontrada.');
     const current = await this.prisma.communicationComment.findFirst({
-      where: { id: commentId, communicationId: communication.id },
+      where: {
+        id: commentId,
+        communicationId: communication.id,
+        versionId: communicationVersion.id,
+      },
       select: { authorId: true },
     });
     if (!current) throw new NotFoundException('Comentário não encontrado.');
@@ -1558,14 +1641,28 @@ export class RepoService {
     type: string,
     code: string,
     commentId: string,
+    version: string,
     gboxUserId?: string,
   ) {
     const [communication, author] = await Promise.all([
       this.resolveCommunication(type, code),
       this.requireCommentAuthor(gboxUserId),
     ]);
+    if (!version)
+      throw new BadRequestException('A versão da comunicação é obrigatória.');
+    const communicationVersion =
+      await this.prisma.communicationVersion.findFirst({
+        where: { communicationId: communication.id, version },
+        select: { id: true },
+      });
+    if (!communicationVersion)
+      throw new NotFoundException('Versão da comunicação não encontrada.');
     const current = await this.prisma.communicationComment.findFirst({
-      where: { id: commentId, communicationId: communication.id },
+      where: {
+        id: commentId,
+        communicationId: communication.id,
+        versionId: communicationVersion.id,
+      },
       select: { authorId: true },
     });
     if (!current) throw new NotFoundException('Comentário não encontrado.');
@@ -1847,6 +1944,45 @@ export class RepoService {
     };
   }
 
+  async saveCommunication(
+    type: string,
+    code: string,
+    body: {
+      taxonomy?: { categoryIds?: string[]; subcategoryIds?: string[] };
+      properties?: {
+        name?: string | null;
+        description?: string | null;
+        tags?: string[];
+        services?: string[];
+        teams?: string[];
+      };
+      content?: { version?: string; locale?: string; content?: string | null };
+    },
+    gboxUserId?: string,
+  ) {
+    if (!body.taxonomy && !body.properties && !body.content) {
+      throw new BadRequestException('Não existem alterações para guardar.');
+    }
+
+    const taxonomy = body.taxonomy
+      ? (await this.updateCommunicationTaxonomy(type, code, body.taxonomy, gboxUserId)).data
+      : undefined;
+    const content = body.content
+      ? (await this.updateCommunicationContent(type, code, body.content, gboxUserId)).data
+      : undefined;
+    const properties = body.properties
+      ? (await this.updateCommunicationProperties(type, code, body.properties, gboxUserId)).data
+      : undefined;
+    const requestedVersion = content?.version ?? body.content?.version;
+    const locale = content?.locale ?? body.content?.locale ?? 'PT';
+    const detail = (await this.details(type, code, locale, requestedVersion)).data;
+
+    return {
+      status: true,
+      data: { detail, taxonomy, properties, content },
+    };
+  }
+
   async updateCommunicationContent(
     type: string,
     code: string,
@@ -1960,7 +2096,7 @@ export class RepoService {
       data: {
         communicationId: communication.id,
         version: nextVersion,
-        status: 'PENDING',
+        status: 'DRAFT',
         effectiveAt: null,
         publishedAt: null,
         createdById: actor?.id,
@@ -2032,7 +2168,7 @@ export class RepoService {
         locale,
         content,
         versionCreated: true,
-        versionStatus: 'PENDING',
+        versionStatus: 'DRAFT',
       },
     };
   }
@@ -2256,7 +2392,27 @@ export class RepoService {
     );
   }
 
-  async sync(authorization?: string, userId?: string | number) {
+  private validatedCategoryIcon(iconData?: string | null) {
+    if (iconData === undefined) return undefined;
+    if (!iconData) return null;
+    const match =
+      /^data:(image\/(?:png|jpeg|jpg)|image\/svg\+xml);base64,([A-Za-z0-9+/]+={0,2})$/.exec(
+        iconData,
+      );
+    if (!match)
+      throw new BadRequestException(
+        'O ícone deve ser um ficheiro PNG, JPG ou SVG válido.',
+      );
+    if (Buffer.byteLength(match[2], 'base64') > 512 * 1024)
+      throw new BadRequestException('O ícone não pode exceder 512 KB.');
+    return iconData;
+  }
+
+  async sync(
+    authorization?: string,
+    userId?: string | number,
+    fullReplace = false,
+  ) {
     if (!authorization)
       throw new HttpException(
         { status: false, message: 'Authorization is required.' },
@@ -2278,7 +2434,7 @@ export class RepoService {
     });
     await this.saveSnapshot('gbox-repo-original', payload);
     const templates = this.unwrapTemplates(payload);
-    const run = await this.importer.import(templates);
+    const run = await this.importer.import(templates, { fullReplace });
     try {
       let detailAuthorization = await this.refreshSyncAuthorization(
         userId,
@@ -2618,7 +2774,7 @@ export class RepoService {
             ...(!existing.displayName && values.displayName
               ? { displayName: values.displayName }
               : {}),
-            ...(!existing.email && values.email ? { email: values.email } : {}),
+            ...(values.email ? { email: values.email } : {}),
           },
         })
       : await this.prisma.user.create({ data: values });
@@ -2777,6 +2933,57 @@ export class RepoService {
     return filtered;
   }
 
+  private async enrichTemplatesWithTaxonomyPairs(
+    templates: GboxTemplates,
+  ): Promise<GboxTemplates> {
+    const assignments = await this.prisma.communicationSubcategory.findMany({
+      select: {
+        category: { select: { name: true } },
+        subcategory: { select: { name: true } },
+        communication: {
+          select: {
+            code: true,
+            channel: { select: { key: true } },
+          },
+        },
+      },
+    });
+    const pairsByCommunication = new Map<
+      string,
+      Array<{ category: string; subcategory: string }>
+    >();
+    for (const assignment of assignments) {
+      const key = `${assignment.communication.channel.key}:${assignment.communication.code}`;
+      const pairs = pairsByCommunication.get(key) ?? [];
+      pairs.push({
+        category: assignment.category.name,
+        subcategory: assignment.subcategory.name,
+      });
+      pairsByCommunication.set(key, pairs);
+    }
+
+    return Object.fromEntries(
+      Object.entries(templates).map(([channel, channelTemplates]) => {
+        if (!channelTemplates || Array.isArray(channelTemplates)) {
+          return [channel, channelTemplates];
+        }
+        return [
+          channel,
+          Object.fromEntries(
+            Object.entries(channelTemplates).map(([code, template]) => [
+              code,
+              {
+                ...template,
+                taxonomyPairs:
+                  pairsByCommunication.get(`${channel}:${code}`) ?? [],
+              },
+            ]),
+          ),
+        ];
+      }),
+    );
+  }
+
   private async filterTemplatesByTaxonomy(
     templates: GboxTemplates,
     categoryId?: string,
@@ -2796,8 +3003,8 @@ export class RepoService {
       },
     });
     const allowed = new Set(
-      assignments.map(({ communication: { channel, code } }) =>
-        `${channel.key}:${code}`,
+      assignments.map(
+        ({ communication: { channel, code } }) => `${channel.key}:${code}`,
       ),
     );
     const filtered: GboxTemplates = {};
@@ -2930,7 +3137,7 @@ export class RepoService {
     versionEntry[locale] = localeEntry;
     versionEntry.versao = nextVersion;
     versionEntry.dataVersao = undefined;
-    versionEntry.estado = 'PENDING';
+    versionEntry.estado = 'DRAFT';
     versions[nextVersion] = versionEntry;
     communication.versoes = versions;
 
