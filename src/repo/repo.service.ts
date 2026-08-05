@@ -2929,39 +2929,22 @@ export class RepoService {
   private async enrichTemplatesWithTaxonomyPairs(
     templates: GboxTemplates,
   ): Promise<GboxTemplates> {
-    const [assignments, activeCategories, activeSubcategories] =
-      await Promise.all([
-        this.prisma.communicationSubcategory.findMany({
-          where: {
-            category: { isActive: true },
-            subcategory: { isActive: true },
-          },
+    const assignments = await this.prisma.communicationSubcategory.findMany({
+      where: {
+        category: { isActive: true },
+        subcategory: { isActive: true },
+      },
+      select: {
+        category: { select: { name: true } },
+        subcategory: { select: { name: true } },
+        communication: {
           select: {
-            category: { select: { name: true } },
-            subcategory: { select: { name: true } },
-            communication: {
-              select: {
-                code: true,
-                channel: { select: { key: true } },
-              },
-            },
+            code: true,
+            channel: { select: { key: true } },
           },
-        }),
-        this.prisma.category.findMany({
-          where: { isActive: true },
-          select: { name: true },
-        }),
-        this.prisma.subcategory.findMany({
-          where: { isActive: true },
-          select: { name: true },
-        }),
-      ]);
-    const activeCategoryNames = new Set(
-      activeCategories.map(({ name }) => name.toLocaleLowerCase('pt-PT')),
-    );
-    const activeSubcategoryNames = new Set(
-      activeSubcategories.map(({ name }) => name.toLocaleLowerCase('pt-PT')),
-    );
+        },
+      },
+    });
     const pairsByCommunication = new Map<
       string,
       Array<{ category: string; subcategory: string }>
@@ -2984,20 +2967,25 @@ export class RepoService {
         return [
           channel,
           Object.fromEntries(
-            Object.entries(channelTemplates).map(([code, template]) => [
-              code,
-              {
-                ...template,
-                categoria: template.categoria?.filter((name) =>
-                  activeCategoryNames.has(name.toLocaleLowerCase('pt-PT')),
-                ),
-                subcategoria: template.subcategoria?.filter((name) =>
-                  activeSubcategoryNames.has(name.toLocaleLowerCase('pt-PT')),
-                ),
-                taxonomyPairs:
-                  pairsByCommunication.get(`${channel}:${code}`) ?? [],
-              },
-            ]),
+            Object.entries(channelTemplates).map(([code, template]) => {
+              const taxonomyPairs =
+                pairsByCommunication.get(`${channel}:${code}`) ?? [];
+              return [
+                code,
+                {
+                  ...template,
+                  categoria: [
+                    ...new Set(taxonomyPairs.map(({ category }) => category)),
+                  ],
+                  subcategoria: [
+                    ...new Set(
+                      taxonomyPairs.map(({ subcategory }) => subcategory),
+                    ),
+                  ],
+                  taxonomyPairs,
+                },
+              ];
+            }),
           ),
         ];
       }),
