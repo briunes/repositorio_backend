@@ -9,6 +9,8 @@ export class VersionController {
 
   @Get()
   @Header('Cache-Control', 'no-store, no-cache, must-revalidate')
+  @Header('CDN-Cache-Control', 'no-store')
+  @Header('Surrogate-Control', 'no-store')
   async current() {
     return {
       status: true,

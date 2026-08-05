@@ -17,6 +17,7 @@ export type GboxTemplate = {
   desc?: string;
   categoria?: string[];
   subcategoria?: string[];
+  taxonomyPairs?: Array<{ category: string; subcategory: string }>;
   equipa?: string[];
   servico?: string[];
   tags?: string | string[];
