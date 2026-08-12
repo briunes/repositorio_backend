@@ -2704,7 +2704,12 @@ export class RepoService {
     const payload = (await response.json().catch(() => null)) as unknown;
     if (!response.ok)
       throw new HttpException(
-        payload ?? { status: false, message: 'GBox request failed.' },
+        path === '/repo/login' &&
+          this.isObject(payload) &&
+          this.firstString(payload.message)?.toLocaleLowerCase() ===
+            'unauthorized origin'
+          ? { ...payload, message: 'Origem não autorizada' }
+          : (payload ?? { status: false, message: 'GBox request failed.' }),
         response.status,
       );
     return payload;
