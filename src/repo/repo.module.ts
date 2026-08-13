@@ -13,5 +13,6 @@ import { AppTokenService } from '../auth/app-token.service';
     GboxDetailSyncService,
     AppTokenService,
   ],
+  exports: [RepoService],
 })
 export class RepoModule {}

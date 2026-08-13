@@ -24,14 +24,25 @@ export class WorkflowController {
       description?: string;
       channelId?: string;
       ownerTeamId?: string;
+      categoryIds?: string[];
+      subcategoryIds?: string[];
+      serviceIds?: string[];
+      tagNames?: string[];
       locale?: string;
-      subject?: string;
       content?: string;
-      changeSummary?: string;
     },
     @Headers('x-repo-user-id') userId?: string,
   ) {
     return this.workflow.createCommunication(body, userId);
+  }
+
+  @Get('communication-variables/catalog')
+  @RequirePermissions('communications.create')
+  variableCatalog(
+    @Query('channel') channel = 'SMS',
+    @Headers('x-repo-user-id') userId?: string,
+  ) {
+    return this.workflow.variableCatalog(channel, userId);
   }
 
   @Get('communications/:communicationId/manage')
@@ -103,6 +114,14 @@ export class WorkflowController {
         subject?: string | null;
         content?: string | null;
       }>;
+      communication?: {
+        name?: string;
+        description?: string | null;
+        categoryIds?: string[];
+        subcategoryIds?: string[];
+        serviceIds?: string[];
+        tagNames?: string[];
+      };
     },
     @Headers('x-repo-user-id') userId?: string,
   ) {

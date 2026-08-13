@@ -7,7 +7,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { AppTokenService } from './app-token.service';
 import { IS_PUBLIC_KEY } from './public.decorator';
 import { PrismaService } from '../database/prisma.service';
@@ -28,16 +28,31 @@ export class AppAuthGuard implements CanActivate {
       ])
     )
       return true;
-    const request = context.switchToHttp().getRequest<Request>();
+    const http = context.switchToHttp();
+    const request = http.getRequest<Request>();
+    const response = http.getResponse<Response>();
     const authorization = request.headers.authorization;
     const token = authorization?.startsWith('Bearer ')
       ? authorization.slice(7)
       : '';
     if (!token) throw new UnauthorizedException('App token is required.');
-    const claims = this.tokens.verify(token);
+    const { claims, renewedToken } = await this.tokens.authenticate(token, {
+      ipAddress: this.ipAddress(request),
+      userAgent: request.get('user-agent')?.slice(0, 500),
+    });
+    if (renewedToken) response.setHeader('X-Repo-Access-Token', renewedToken);
     request.headers['x-repo-user-id'] = claims.sub;
+    request.headers['x-repo-session-id'] = claims.sid;
     await this.enforceOperationalMode(request, claims.sub);
     return true;
+  }
+
+  private ipAddress(request: Request) {
+    const forwarded = request.get('x-forwarded-for')?.split(',')[0]?.trim();
+    return (forwarded || request.ip || request.socket.remoteAddress)?.slice(
+      0,
+      45,
+    );
   }
 
   private async enforceOperationalMode(request: Request, gboxUserId: string) {
