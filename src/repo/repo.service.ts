@@ -32,6 +32,7 @@ type TaxonomyData = {
 @Injectable()
 export class RepoService {
   private readonly baseUrl?: string;
+  private readonly requestOrigin?: string;
   private templatesCache?: { data: GboxTemplates; expiresAt: number };
 
   constructor(
@@ -43,6 +44,9 @@ export class RepoService {
     private readonly appTokens: AppTokenService,
   ) {
     this.baseUrl = config.get<string>('GBOX_API_BASE_URL')?.replace(/\/$/, '');
+    this.requestOrigin = config
+      .get<string>('GBOX_REQUEST_ORIGIN')
+      ?.replace(/\/$/, '');
   }
 
   async login(body: JsonObject, metadata: SessionRequestMetadata = {}) {
@@ -2743,6 +2747,7 @@ export class RepoService {
         ...init,
         headers: {
           Accept: 'application/json',
+          ...(this.requestOrigin ? { Origin: this.requestOrigin } : {}),
           ...(init.body ? { 'Content-Type': 'application/json' } : {}),
           ...init.headers,
         },
