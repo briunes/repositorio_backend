@@ -17,6 +17,7 @@ import { GboxTemplateDetail, GboxTemplates } from '../sync/gbox.types';
 import { GboxDetailSyncService } from '../sync/gbox-detail-sync.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { AppTokenService } from '../auth/app-token.service';
+import type { SessionRequestMetadata } from '../auth/app-token.service';
 import {
   markRequestCache,
   recordSupabaseCall,
@@ -44,7 +45,7 @@ export class RepoService {
     this.baseUrl = config.get<string>('GBOX_API_BASE_URL')?.replace(/\/$/, '');
   }
 
-  async login(body: JsonObject) {
+  async login(body: JsonObject, metadata: SessionRequestMetadata = {}) {
     const response = await this.request('/repo/login', {
       method: 'POST',
       body: JSON.stringify(body),
@@ -57,8 +58,19 @@ export class RepoService {
     return this.withAppSession(
       response,
       appRole,
-      (config?.sessionDurationMinutes ?? 480) * 60,
+      (config?.sessionDurationMinutes ?? 60) * 60,
+      metadata,
     );
+  }
+
+  async logout(sessionId?: string) {
+    if (sessionId) {
+      await this.prisma.userSession.updateMany({
+        where: { id: sessionId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+    }
+    return { status: true, data: { sessionId: sessionId ?? null } };
   }
 
   async profile(gboxUserId?: string) {
@@ -252,7 +264,7 @@ export class RepoService {
     activity: 'all' | 'active' | 'pending' | 'scheduled' | 'inactive' = 'all',
     categoryId?: string,
     subcategoryId?: string,
-  ) {
+  ): Promise<{ status: boolean; data: GboxTemplates }> {
     if (
       !['all', 'active', 'pending', 'scheduled', 'inactive'].includes(activity)
     ) {
@@ -268,6 +280,12 @@ export class RepoService {
       this.templatesCache?.expiresAt &&
       this.templatesCache.expiresAt > Date.now()
     ) {
+      if (
+        await this.hasMissingLocalPendingTemplates(this.templatesCache.data)
+      ) {
+        await this.invalidateRepositoryTemplates();
+        return this.templates(activity, categoryId, subcategoryId);
+      }
       const filtered = this.filterTemplatesByActivity(
         this.templatesCache.data,
         activity,
@@ -290,6 +308,10 @@ export class RepoService {
     });
     if (snapshot && this.isObject(snapshot.payload)) {
       const data = snapshot.payload as GboxTemplates;
+      if (await this.hasMissingLocalPendingTemplates(data)) {
+        await this.invalidateRepositoryTemplates();
+        return this.templates(activity, categoryId, subcategoryId);
+      }
       this.cacheTemplates(data);
       const filtered = this.filterTemplatesByActivity(data, activity);
       return {
@@ -559,6 +581,12 @@ export class RepoService {
             'id', id, 'name', name, 'slug', slug
           ) ORDER BY name ASC)
           FROM services WHERE is_active = true
+        ), '[]'::json),
+        'tags', COALESCE((
+          SELECT json_agg(json_build_object(
+            'id', id, 'name', name, 'slug', slug
+          ) ORDER BY name ASC)
+          FROM tags
         ), '[]'::json),
         'teams', COALESCE((
           SELECT json_agg(json_build_object(
@@ -1940,17 +1968,39 @@ export class RepoService {
     }
 
     const taxonomy = body.taxonomy
-      ? (await this.updateCommunicationTaxonomy(type, code, body.taxonomy, gboxUserId)).data
+      ? (
+          await this.updateCommunicationTaxonomy(
+            type,
+            code,
+            body.taxonomy,
+            gboxUserId,
+          )
+        ).data
       : undefined;
     const content = body.content
-      ? (await this.updateCommunicationContent(type, code, body.content, gboxUserId)).data
+      ? (
+          await this.updateCommunicationContent(
+            type,
+            code,
+            body.content,
+            gboxUserId,
+          )
+        ).data
       : undefined;
     const properties = body.properties
-      ? (await this.updateCommunicationProperties(type, code, body.properties, gboxUserId)).data
+      ? (
+          await this.updateCommunicationProperties(
+            type,
+            code,
+            body.properties,
+            gboxUserId,
+          )
+        ).data
       : undefined;
     const requestedVersion = content?.version ?? body.content?.version;
     const locale = content?.locale ?? body.content?.locale ?? 'PT';
-    const detail = (await this.details(type, code, locale, requestedVersion)).data;
+    const detail = (await this.details(type, code, locale, requestedVersion))
+      .data;
 
     return {
       status: true,
@@ -2777,10 +2827,11 @@ export class RepoService {
     return undefined;
   }
 
-  private withAppSession(
+  private async withAppSession(
     payload: unknown,
     appRole?: string,
-    lifetimeSeconds = 8 * 60 * 60,
+    lifetimeSeconds = 60 * 60,
+    metadata: SessionRequestMetadata = {},
   ) {
     if (
       !this.isObject(payload) ||
@@ -2801,7 +2852,12 @@ export class RepoService {
       ...payload,
       data: {
         ...payload.data,
-        token: this.appTokens.issue(userId, username, lifetimeSeconds),
+        token: await this.appTokens.createSession(
+          userId,
+          username,
+          lifetimeSeconds,
+          metadata,
+        ),
         gboxToken,
         expiresIn: lifetimeSeconds,
         user: { ...payload.data.user, ...(appRole ? { role: appRole } : {}) },
@@ -3019,6 +3075,28 @@ export class RepoService {
 
   private invalidateTemplatesCache() {
     this.templatesCache = undefined;
+  }
+
+  async invalidateRepositoryTemplates() {
+    this.invalidateTemplatesCache();
+    await this.prisma.repositorySnapshot.deleteMany({
+      where: { key: 'gbox-templates' },
+    });
+  }
+
+  private async hasMissingLocalPendingTemplates(data: GboxTemplates) {
+    const pending = await this.prisma.communication.findMany({
+      where: { status: 'PENDING', sourceSystem: null },
+      select: { code: true, channel: { select: { key: true } } },
+    });
+    return pending.some(({ channel, code }) => {
+      const channelTemplates = data[channel.key];
+      return (
+        !channelTemplates ||
+        Array.isArray(channelTemplates) ||
+        !Object.prototype.hasOwnProperty.call(channelTemplates, code)
+      );
+    });
   }
 
   private async assertFullSmsEditingEnabled() {

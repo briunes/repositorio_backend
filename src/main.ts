@@ -23,6 +23,7 @@ async function bootstrap() {
       'X-Repo-User-Id',
       'X-GBox-Authorization',
     ],
+    exposedHeaders: ['X-Repo-Access-Token'],
   });
   await app.listen(process.env.PORT ?? 3000);
 }

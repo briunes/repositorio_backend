@@ -48,6 +48,63 @@ export class AdminService {
     return { status: true, data };
   }
 
+  async sessions(currentSessionId?: string) {
+    const data = await this.prisma.userSession.findMany({
+      orderBy: { lastActivityAt: 'desc' },
+      take: 500,
+      select: {
+        id: true,
+        ipAddress: true,
+        userAgent: true,
+        createdAt: true,
+        lastActivityAt: true,
+        expiresAt: true,
+        revokedAt: true,
+        user: {
+          select: {
+            id: true,
+            username: true,
+            displayName: true,
+            email: true,
+          },
+        },
+      },
+    });
+    return {
+      status: true,
+      data: data.map((session) => ({
+        ...session,
+        renewalGraceEndsAt: new Date(
+          session.expiresAt.getTime() + 15 * 60 * 1000,
+        ),
+        current: session.id === currentSessionId,
+      })),
+    };
+  }
+
+  async revokeSession(id: string) {
+    const existing = await this.prisma.userSession.findUnique({
+      where: { id },
+      select: { id: true, revokedAt: true },
+    });
+    if (!existing) throw new NotFoundException('Session not found.');
+    if (!existing.revokedAt) {
+      await this.prisma.userSession.update({
+        where: { id },
+        data: { revokedAt: new Date() },
+      });
+    }
+    return { status: true, data: { id } };
+  }
+
+  async revokeAllSessions() {
+    const result = await this.prisma.userSession.updateMany({
+      where: { revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    return { status: true, data: { count: result.count } };
+  }
+
   async roles() {
     const data = await this.prisma.role.findMany({
       orderBy: { name: 'asc' },

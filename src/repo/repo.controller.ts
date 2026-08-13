@@ -6,11 +6,15 @@ import {
   GoneException,
   Header,
   Headers,
+  HttpCode,
+  HttpStatus,
   Param,
   Patch,
   Post,
   Query,
+  Req,
 } from '@nestjs/common';
+import type { Request } from 'express';
 import { RepoService } from './repo.service';
 import { Public } from '../auth/public.decorator';
 
@@ -19,9 +23,22 @@ export class RepoController {
   constructor(private readonly repo: RepoService) {}
 
   @Post('login')
+  @HttpCode(HttpStatus.OK)
   @Public()
-  login(@Body() body: Record<string, unknown>) {
-    return this.repo.login(body);
+  login(@Body() body: Record<string, unknown>, @Req() request: Request) {
+    const forwarded = request.get('x-forwarded-for')?.split(',')[0]?.trim();
+    return this.repo.login(body, {
+      ipAddress: (forwarded || request.ip || request.socket.remoteAddress)?.slice(
+        0,
+        45,
+      ),
+      userAgent: request.get('user-agent')?.slice(0, 500),
+    });
+  }
+
+  @Delete('session')
+  logout(@Headers('x-repo-session-id') sessionId?: string) {
+    return this.repo.logout(sessionId);
   }
 
   @Get('profile')

@@ -15,13 +15,70 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { WorkflowAccessService } from './workflow-access.service';
+import { RepoService } from '../repo/repo.service';
 
 @Injectable()
 export class WorkflowService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly access: WorkflowAccessService,
+    private readonly repo: RepoService,
   ) {}
+
+  async variableCatalog(channelKey = 'SMS', gboxUserId?: string) {
+    await this.access.user(gboxUserId);
+    const normalizedChannel = channelKey.trim().toUpperCase();
+    const variables = await this.prisma.communicationVariable.findMany({
+      where: {
+        version: { communication: { channel: { key: normalizedChannel } } },
+      },
+      select: {
+        key: true,
+        description: true,
+        placeholder: true,
+        sampleValue: true,
+        isRequired: true,
+        version: {
+          select: {
+            communication: { select: { channel: { select: { key: true } } } },
+          },
+        },
+      },
+      orderBy: [{ key: 'asc' }, { sortOrder: 'asc' }],
+    });
+    const catalog = new Map<
+      string,
+      {
+        key: string;
+        description: string | null;
+        placeholder: string | null;
+        sampleValue: string | null;
+        isRequired: boolean;
+        usageCount: number;
+      }
+    >();
+    for (const variable of variables) {
+      const { version: _version, ...variableData } = variable;
+      const existing = catalog.get(variable.key);
+      if (!existing) {
+        catalog.set(variable.key, { ...variableData, usageCount: 1 });
+        continue;
+      }
+      existing.usageCount += 1;
+      existing.description ||= variable.description;
+      existing.placeholder ||= variable.placeholder;
+      existing.sampleValue ||= variable.sampleValue;
+      existing.isRequired ||= variable.isRequired;
+    }
+    return {
+      status: true,
+      data: [...catalog.values()].sort(
+        (left, right) =>
+          right.usageCount - left.usageCount ||
+          left.key.localeCompare(right.key, 'pt-PT'),
+      ),
+    };
+  }
 
   async createCommunication(
     body: {
@@ -30,17 +87,23 @@ export class WorkflowService {
       description?: string;
       channelId?: string;
       ownerTeamId?: string;
+      categoryIds?: string[];
+      subcategoryIds?: string[];
+      serviceIds?: string[];
+      tagNames?: string[];
       locale?: string;
-      subject?: string;
       content?: string;
-      changeSummary?: string;
     },
     gboxUserId?: string,
   ) {
     const actor = await this.access.user(gboxUserId);
-    const code = body.code?.trim();
     const name = body.name?.trim();
+    const code = body.code?.trim() || this.communicationCode(name ?? '');
     const locale = body.locale?.trim().toUpperCase() || 'PT';
+    if (locale !== 'PT')
+      throw new BadRequestException(
+        'De momento, o idioma tem de ser Português.',
+      );
     if (!code || !name || !body.channelId || !body.ownerTeamId) {
       throw new BadRequestException(
         'Código, nome, canal e equipa responsável são obrigatórios.',
@@ -48,28 +111,168 @@ export class WorkflowService {
     }
     if (!body.content?.trim())
       throw new BadRequestException('O conteúdo inicial é obrigatório.');
-    await this.access.requireTeamRole(actor.id, body.ownerTeamId, ['EDITOR']);
-    const [channel, team, duplicate] = await Promise.all([
-      this.prisma.channel.findUnique({
-        where: { id: body.channelId },
-        select: { id: true },
-      }),
-      this.prisma.team.findUnique({
-        where: { id: body.ownerTeamId },
-        select: { id: true, isActive: true },
-      }),
-      this.prisma.communication.findFirst({
-        where: { channelId: body.channelId, code },
-        select: { id: true },
-      }),
+    const categoryIds = [...new Set(body.categoryIds ?? [])];
+    const subcategoryIds = [...new Set(body.subcategoryIds ?? [])];
+    if (!categoryIds.length || !subcategoryIds.length)
+      throw new BadRequestException(
+        'Selecione pelo menos uma categoria e uma subcategoria.',
+      );
+    const serviceIds = [...new Set(body.serviceIds ?? [])];
+    const tagNames = [
+      ...new Map(
+        (body.tagNames ?? []).map((value) => [
+          value.trim().toLocaleLowerCase('pt-PT'),
+          value.trim(),
+        ]),
+      ).values(),
+    ].filter(Boolean);
+    if (tagNames.some((tag) => tag.length > 100))
+      throw new BadRequestException(
+        'As tags não podem exceder 100 caracteres.',
+      );
+    if (!serviceIds.length)
+      throw new BadRequestException('Selecione pelo menos um serviço.');
+    await this.access.requireTeamRole(actor.id, body.ownerTeamId, [
+      'EDITOR',
+      'OWNER',
     ]);
+    const [channel, team, duplicate, taxonomyPairs, services] =
+      await Promise.all([
+        this.prisma.channel.findUnique({
+          where: { id: body.channelId },
+          select: { id: true, key: true },
+        }),
+        this.prisma.team.findUnique({
+          where: { id: body.ownerTeamId },
+          select: { id: true, isActive: true },
+        }),
+        this.prisma.communication.findFirst({
+          where: { channelId: body.channelId, code },
+          select: {
+            id: true,
+            status: true,
+            sourceSystem: true,
+            ownerTeamId: true,
+            versions: { select: { id: true }, take: 1 },
+          },
+        }),
+        this.prisma.categorySubcategory.findMany({
+          where: {
+            categoryId: { in: categoryIds },
+            subcategoryId: { in: subcategoryIds },
+            category: { isActive: true },
+            subcategory: { isActive: true },
+          },
+          select: {
+            categoryId: true,
+            subcategoryId: true,
+          },
+        }),
+        this.prisma.service.findMany({
+          where: { id: { in: serviceIds }, isActive: true },
+          select: { id: true },
+        }),
+      ]);
     if (!channel) throw new NotFoundException('Canal não encontrado.');
+    if (channel.key !== 'SMS')
+      throw new BadRequestException(
+        'De momento, apenas podem ser criadas comunicações SMS.',
+      );
     if (!team?.isActive)
       throw new BadRequestException('A equipa responsável não está ativa.');
-    if (duplicate)
-      throw new ConflictException(
-        'Já existe uma comunicação com este código e canal.',
+    if (duplicate) {
+      const incompleteLocalCreate =
+        duplicate.status === 'PENDING' &&
+        !duplicate.sourceSystem &&
+        duplicate.ownerTeamId === body.ownerTeamId &&
+        duplicate.versions.length === 0;
+      if (incompleteLocalCreate) {
+        await this.prisma.communication.delete({ where: { id: duplicate.id } });
+      } else {
+        throw new ConflictException(
+          'Já existe uma comunicação com este código e canal.',
+        );
+      }
+    }
+    const matchedCategoryIds = new Set(
+      taxonomyPairs.map((pair) => pair.categoryId),
+    );
+    const matchedSubcategoryIds = new Set(
+      taxonomyPairs.map((pair) => pair.subcategoryId),
+    );
+    if (
+      matchedCategoryIds.size !== categoryIds.length ||
+      matchedSubcategoryIds.size !== subcategoryIds.length
+    )
+      throw new BadRequestException(
+        'Cada categoria e subcategoria deve formar pelo menos uma combinação válida.',
       );
+    if (services.length !== serviceIds.length)
+      throw new BadRequestException(
+        'Um dos serviços selecionados não está disponível.',
+      );
+    const invalidTag = tagNames.find((name) => !this.slug(name));
+    if (invalidTag)
+      throw new BadRequestException(
+        `A tag “${invalidTag}” deve incluir letras ou números.`,
+      );
+    const tagIds: string[] = [];
+    for (const name of tagNames) {
+      const slug = this.slug(name);
+      const existingTag = await this.prisma.tag.findFirst({
+        where: { OR: [{ name }, { slug }] },
+        select: { id: true },
+      });
+      const tag =
+        existingTag ??
+        (await this.prisma.tag.create({
+          data: { name, slug },
+          select: { id: true },
+        }));
+      tagIds.push(tag.id);
+    }
+    const contentVariableKeys = [
+      ...new Set(
+        [...body.content.matchAll(/\{\{\s*([^{}]+?)\s*\}\}/g)].map((match) =>
+          match[1].trim(),
+        ),
+      ),
+    ];
+    const storedVariables = contentVariableKeys.length
+      ? await this.prisma.communicationVariable.findMany({
+          where: {
+            key: { in: contentVariableKeys },
+            version: { communication: { channelId: body.channelId } },
+          },
+          select: {
+            key: true,
+            description: true,
+            placeholder: true,
+            sampleValue: true,
+            isRequired: true,
+            version: {
+              select: {
+                communication: { select: { channelId: true } },
+              },
+            },
+          },
+          orderBy: { version: { updatedAt: 'desc' } },
+        })
+      : [];
+    const variablesByKey = new Map(
+      storedVariables.map(({ version: _version, ...variable }) => [
+        variable.key,
+        variable,
+      ]),
+    );
+    const unknownVariable = contentVariableKeys.find(
+      (key) => !variablesByKey.has(key),
+    );
+    if (unknownVariable) {
+      throw new BadRequestException(
+        `A variável “${unknownVariable}” não existe no catálogo do canal.`,
+      );
+    }
     const communication = await this.prisma.communication.create({
       data: {
         code,
@@ -78,37 +281,73 @@ export class WorkflowService {
         channelId: body.channelId,
         ownerTeamId: body.ownerTeamId,
         status: 'PENDING',
-        versions: {
-          create: {
-            version: 'v1',
-            revision: 1,
-            status: 'DRAFT',
-            createdById: actor.id,
-            changeSummary: body.changeSummary?.trim() || 'Versão inicial',
-            localizations: {
-              create: {
-                locale,
-                subject: body.subject?.trim() || null,
-                content: body.content,
-              },
-            },
-          },
+        subcategories: {
+          create: taxonomyPairs.map(({ categoryId, subcategoryId }) => ({
+            categoryId,
+            subcategoryId,
+          })),
         },
+        services: { create: serviceIds.map((serviceId) => ({ serviceId })) },
+        teams: { create: { teamId: body.ownerTeamId } },
+        tags: { create: tagIds.map((tagId) => ({ tagId })) },
       },
       select: {
         id: true,
         code: true,
         name: true,
         ownerTeamId: true,
-        versions: { select: { id: true, version: true, status: true } },
       },
+    });
+    const version = await this.prisma.communicationVersion.create({
+      data: {
+        communicationId: communication.id,
+        version: 'v1',
+        revision: 1,
+        status: 'DRAFT',
+        createdById: actor.id,
+        changeSummary: null,
+        localizations: {
+          create: { locale, subject: null, content: body.content },
+        },
+        variables: {
+          create: contentVariableKeys.map((key, sortOrder) => ({
+            ...variablesByKey.get(key)!,
+            sortOrder,
+          })),
+        },
+      },
+      select: { id: true, version: true, status: true },
     });
     await this.record(actor.id, 'CREATE', communication.id, {
       operation: 'communication',
       ownerTeamId: body.ownerTeamId,
       channelId: body.channelId,
+      categoryIds,
+      subcategoryIds,
+      serviceIds,
+      tagNames,
     });
-    return { status: true, data: communication };
+    await this.repo.invalidateRepositoryTemplates();
+    return { status: true, data: { ...communication, versions: [version] } };
+  }
+
+  private slug(value: string) {
+    return value
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+  }
+
+  private communicationCode(value: string) {
+    return value
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 120);
   }
 
   async communicationDetail(communicationId: string, gboxUserId?: string) {
@@ -171,7 +410,7 @@ export class WorkflowService {
 
   async versionDetail(versionId: string, gboxUserId?: string) {
     const actor = await this.access.user(gboxUserId);
-    const version = await this.prisma.communicationVersion.findUnique({
+    let version = await this.prisma.communicationVersion.findUnique({
       where: { id: versionId },
       include: {
         localizations: { orderBy: { locale: 'asc' } },
@@ -189,7 +428,36 @@ export class WorkflowService {
       'PUBLISHER',
       'OWNER',
     ]);
-    return { status: true, data: { ...version, communication } };
+    if (version.status === 'DRAFT' && !version.localizations.length) {
+      await this.prisma.communicationLocalization.create({
+        data: { versionId, locale: 'PT', subject: null, content: '' },
+      });
+      version = await this.prisma.communicationVersion.findUnique({
+        where: { id: versionId },
+        include: {
+          localizations: { orderBy: { locale: 'asc' } },
+          variables: { orderBy: { sortOrder: 'asc' } },
+        },
+      });
+      if (!version) throw new NotFoundException('Versão não encontrada.');
+    }
+    const metadata = await this.prisma.communication.findUnique({
+      where: { id: version.communicationId },
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        description: true,
+        ownerTeamId: true,
+        channelId: true,
+        channel: { select: { key: true, name: true } },
+        ownerTeam: { select: { id: true, name: true } },
+        subcategories: { select: { categoryId: true, subcategoryId: true } },
+        services: { select: { serviceId: true } },
+        tags: { select: { tag: { select: { name: true } } } },
+      },
+    });
+    return { status: true, data: { ...version, communication: metadata } };
   }
 
   async resumeDraft(versionId: string, gboxUserId?: string) {
@@ -237,6 +505,14 @@ export class WorkflowService {
         subject?: string | null;
         content?: string | null;
       }>;
+      communication?: {
+        name?: string;
+        description?: string | null;
+        categoryIds?: string[];
+        subcategoryIds?: string[];
+        serviceIds?: string[];
+        tagNames?: string[];
+      };
     },
     gboxUserId?: string,
   ) {
@@ -272,7 +548,60 @@ export class WorkflowService {
     );
     await this.access.requireTeamRole(actor.id, communication.ownerTeamId!, [
       'EDITOR',
+      'OWNER',
     ]);
+    const [currentCommunication, currentTaxonomy, currentServices, currentTags] =
+      await Promise.all([
+        this.prisma.communication.findUnique({
+          where: { id: version.communicationId },
+          select: { name: true, description: true },
+        }),
+        this.prisma.communicationSubcategory.findMany({
+          where: { communicationId: version.communicationId },
+          select: {
+            categoryId: true,
+            subcategoryId: true,
+            category: { select: { name: true } },
+            subcategory: { select: { name: true } },
+          },
+        }),
+        this.prisma.communicationService.findMany({
+          where: { communicationId: version.communicationId },
+          select: { serviceId: true, service: { select: { name: true } } },
+        }),
+        this.prisma.communicationTag.findMany({
+          where: { communicationId: version.communicationId },
+          select: { tagId: true, tag: { select: { name: true } } },
+        }),
+      ]);
+    const draftCommunication = body.communication;
+    const name = draftCommunication?.name?.trim();
+    const description = draftCommunication?.description?.trim() || null;
+    const categoryIds = [...new Set(draftCommunication?.categoryIds ?? [])];
+    const subcategoryIds = [
+      ...new Set(draftCommunication?.subcategoryIds ?? []),
+    ];
+    const serviceIds = [...new Set(draftCommunication?.serviceIds ?? [])];
+    const tagNames = [
+      ...new Map(
+        (draftCommunication?.tagNames ?? []).map((value) => [
+          value.trim().toLocaleLowerCase('pt-PT'),
+          value.trim(),
+        ]),
+      ).values(),
+    ].filter(Boolean);
+    if (draftCommunication) {
+      if ((name?.length ?? 0) > 255)
+        throw new BadRequestException(
+          'O nome não pode exceder 255 caracteres.',
+        );
+      if ((description?.length ?? 0) > 4000)
+        throw new BadRequestException(
+          'As observações não podem exceder 4000 caracteres.',
+        );
+      if (tagNames.some((tag) => tag.length > 100 || !this.slug(tag)))
+        throw new BadRequestException('Uma das tags é inválida.');
+    }
     const localizations = body.localizations ?? [];
     if (!localizations.length)
       throw new BadRequestException('Inclua pelo menos uma localização.');
@@ -288,18 +617,181 @@ export class WorkflowService {
         'Uma das localizações não pertence à versão.',
       );
     }
-    for (const localization of localizations) {
-      await this.prisma.communicationLocalization.update({
-        where: {
-          versionId_locale: { versionId, locale: localization.locale! },
-        },
-        data: {
-          subject: localization.subject?.trim() || null,
-          content: localization.content ?? '',
-        },
-      });
+    const contentVariableKeys = [
+      ...new Set(
+        localizations.flatMap(({ content }) =>
+          [...(content ?? '').matchAll(/\{\{\s*([^{}]+?)\s*\}\}/g)].map(
+            (match) => match[1].trim(),
+          ),
+        ),
+      ),
+    ];
+    const storedVariables = contentVariableKeys.length
+      ? await this.prisma.communicationVariable.findMany({
+          where: {
+            key: { in: contentVariableKeys },
+            version: {
+              communication: { channelId: communication.channelId },
+            },
+          },
+          select: {
+            key: true,
+            description: true,
+            placeholder: true,
+            sampleValue: true,
+            isRequired: true,
+            version: {
+              select: {
+                communication: { select: { channelId: true } },
+              },
+            },
+          },
+          orderBy: { version: { updatedAt: 'desc' } },
+        })
+      : [];
+    const variablesByKey = new Map(
+      storedVariables.map(({ version: _version, ...variable }) => [
+        variable.key,
+        variable,
+      ]),
+    );
+    const unknownVariable = contentVariableKeys.find(
+      (key) => !variablesByKey.has(key),
+    );
+    if (unknownVariable) {
+      throw new BadRequestException(
+        `A variável “${unknownVariable}” não existe no catálogo do canal.`,
+      );
     }
-    const data = await this.prisma.communicationVersion.update({
+    let taxonomyPairs: Array<{ categoryId: string; subcategoryId: string }> =
+      [];
+    let tagIds: string[] = [];
+    let selectedCategoryNames: string[] = [];
+    let selectedSubcategoryNames: string[] = [];
+    let selectedServiceNames: string[] = [];
+    if (draftCommunication) {
+      const [pairs, services, existingTags] = await Promise.all([
+        this.prisma.categorySubcategory.findMany({
+          where: {
+            categoryId: { in: categoryIds },
+            subcategoryId: { in: subcategoryIds },
+            category: { isActive: true },
+            subcategory: { isActive: true },
+          },
+          select: {
+            categoryId: true,
+            subcategoryId: true,
+            category: { select: { name: true } },
+            subcategory: { select: { name: true } },
+          },
+        }),
+        this.prisma.service.findMany({
+          where: { id: { in: serviceIds }, isActive: true },
+          select: { id: true, name: true },
+        }),
+        tagNames.length
+          ? this.prisma.tag.findMany({
+              where: {
+                OR: tagNames.flatMap((tagName) => [
+                  { name: tagName },
+                  { slug: this.slug(tagName) },
+                ]),
+              },
+              select: { id: true, name: true, slug: true },
+            })
+          : Promise.resolve([]),
+      ]);
+      const matchedCategories = new Set(pairs.map((pair) => pair.categoryId));
+      const matchedSubcategories = new Set(
+        pairs.map((pair) => pair.subcategoryId),
+      );
+      if (
+        categoryIds.length > 0 &&
+        subcategoryIds.length > 0 &&
+        (matchedCategories.size !== categoryIds.length ||
+          matchedSubcategories.size !== subcategoryIds.length)
+      )
+        throw new BadRequestException(
+          'Cada categoria e subcategoria deve formar uma combinação válida.',
+        );
+      if (serviceIds.length > 0 && services.length !== serviceIds.length)
+        throw new BadRequestException(
+          'Um dos serviços selecionados não está disponível.',
+        );
+      const tagsBySlug = new Map(existingTags.map((tag) => [tag.slug, tag.id]));
+      const missingTags = tagNames.filter(
+        (tagName) => !tagsBySlug.has(this.slug(tagName)),
+      );
+      const createdTags = await Promise.all(
+        missingTags.map((tagName) =>
+          this.prisma.tag.create({
+            data: { name: tagName, slug: this.slug(tagName) },
+            select: { id: true, slug: true },
+          }),
+        ),
+      );
+      createdTags.forEach((tag) => tagsBySlug.set(tag.slug, tag.id));
+      tagIds = tagNames.map((tagName) => tagsBySlug.get(this.slug(tagName))!);
+      taxonomyPairs = pairs;
+      selectedCategoryNames = [...new Set(pairs.map(({ category }) => category.name))];
+      selectedSubcategoryNames = [...new Set(pairs.map(({ subcategory }) => subcategory.name))];
+      selectedServiceNames = services.map(({ name: serviceName }) => serviceName);
+    }
+    const replaceTaxonomy = async () => {
+      await this.prisma.communicationSubcategory.deleteMany({
+        where: { communicationId: version.communicationId },
+      });
+      if (taxonomyPairs.length)
+        await this.prisma.communicationSubcategory.createMany({
+          data: taxonomyPairs.map((pair) => ({
+            communicationId: version.communicationId,
+            categoryId: pair.categoryId,
+            subcategoryId: pair.subcategoryId,
+          })),
+          skipDuplicates: true,
+        });
+    };
+    const replaceServices = async () => {
+      await this.prisma.communicationService.deleteMany({
+        where: { communicationId: version.communicationId },
+      });
+      if (serviceIds.length)
+        await this.prisma.communicationService.createMany({
+          data: serviceIds.map((serviceId) => ({
+            communicationId: version.communicationId,
+            serviceId,
+          })),
+          skipDuplicates: true,
+        });
+    };
+    const replaceTags = async () => {
+      await this.prisma.communicationTag.deleteMany({
+        where: { communicationId: version.communicationId },
+      });
+      if (tagIds.length)
+        await this.prisma.communicationTag.createMany({
+          data: tagIds.map((tagId) => ({
+            communicationId: version.communicationId,
+            tagId,
+          })),
+          skipDuplicates: true,
+        });
+    };
+    const replaceVariables = async () => {
+      await this.prisma.communicationVariable.deleteMany({
+        where: { versionId },
+      });
+      if (contentVariableKeys.length)
+        await this.prisma.communicationVariable.createMany({
+          data: contentVariableKeys.map((key, sortOrder) => ({
+            versionId,
+            ...variablesByKey.get(key)!,
+            sortOrder,
+          })),
+          skipDuplicates: true,
+        });
+    };
+    const versionUpdate = this.prisma.communicationVersion.update({
       where: { id: versionId },
       data: {
         changeSummary: body.changeSummary?.trim() || null,
@@ -307,11 +799,86 @@ export class WorkflowService {
       },
       select: { id: true, status: true, changeSummary: true, updatedAt: true },
     });
-    await this.record(actor.id, 'UPDATE', version.communicationId, {
-      operation: 'draft_content',
-      versionId,
-      locales: localizations.map(({ locale }) => locale || ''),
-    });
+    await Promise.all([
+      ...localizations.map((localization) =>
+        this.prisma.communicationLocalization.update({
+          where: {
+            versionId_locale: { versionId, locale: localization.locale! },
+          },
+          data: {
+            subject: localization.subject?.trim() || null,
+            content: localization.content ?? '',
+          },
+        }),
+      ),
+      replaceVariables(),
+      ...(draftCommunication
+        ? [
+            this.prisma.communication.update({
+              where: { id: version.communicationId },
+              data: { name: name ?? '', description },
+            }),
+            replaceTaxonomy(),
+            replaceServices(),
+            replaceTags(),
+          ]
+        : []),
+    ]);
+    const data = await versionUpdate;
+    const sameValues = (left: unknown[], right: unknown[]) =>
+      [...left].map(String).sort().join('\u0000') ===
+      [...right].map(String).sort().join('\u0000');
+    const auditEntries: unknown[] = [];
+    if (draftCommunication) {
+      const fields: Record<string, { previous: unknown; current: unknown }> = {};
+      if ((currentCommunication?.name ?? '') !== (name ?? ''))
+        fields.name = { previous: currentCommunication?.name ?? '', current: name ?? '' };
+      if ((currentCommunication?.description ?? '') !== (description ?? ''))
+        fields.description = { previous: currentCommunication?.description ?? '', current: description ?? '' };
+      const previousServices = currentServices.map(({ service }) => service.name);
+      if (!sameValues(previousServices, selectedServiceNames))
+        fields.services = { previous: previousServices, current: selectedServiceNames };
+      const previousTags = currentTags.map(({ tag }) => tag.name);
+      if (!sameValues(previousTags, tagNames))
+        fields.tags = { previous: previousTags, current: tagNames };
+      if (Object.keys(fields).length)
+        auditEntries.push({ operation: 'properties', fields });
+
+      const previousPairs = currentTaxonomy.map((item) => ({
+        category: item.category.name,
+        subcategory: item.subcategory.name,
+      }));
+      if (
+        !sameValues(previousPairs.map(({ category }) => category), selectedCategoryNames) ||
+        !sameValues(previousPairs.map(({ subcategory }) => subcategory), selectedSubcategoryNames)
+      ) auditEntries.push({
+        operation: 'taxonomy',
+        previous: previousPairs,
+        categories: selectedCategoryNames,
+        subcategories: selectedSubcategoryNames,
+      });
+    }
+    for (const localization of localizations) {
+      const previous = version.localizations.find(({ locale }) => locale === localization.locale)?.content ?? '';
+      const current = localization.content ?? '';
+      if (previous !== current) auditEntries.push({
+        operation: 'content',
+        fields: { content: { previous, current, version: version.version, locale: localization.locale } },
+      });
+    }
+    await Promise.all([
+      ...auditEntries.map((changes) =>
+        this.record(
+          actor.id,
+          'UPDATE',
+          version.communicationId,
+          JSON.parse(JSON.stringify(changes)) as Prisma.InputJsonValue,
+        ),
+      ),
+      ...(draftCommunication
+        ? [this.repo.invalidateRepositoryTemplates()]
+        : []),
+    ]);
     return { status: true, data };
   }
 
@@ -481,7 +1048,28 @@ export class WorkflowService {
     );
     await this.access.requireTeamRole(actor.id, communication.ownerTeamId!, [
       'EDITOR',
+      'OWNER',
     ]);
+    const communicationReadiness = await this.prisma.communication.findUnique({
+      where: { id: version.communicationId },
+      select: {
+        name: true,
+        subcategories: {
+          select: { categoryId: true, subcategoryId: true },
+          take: 1,
+        },
+        services: { select: { serviceId: true }, take: 1 },
+      },
+    });
+    if (
+      !communicationReadiness?.name.trim() ||
+      !communicationReadiness.subcategories.length ||
+      !communicationReadiness.services.length
+    ) {
+      throw new BadRequestException(
+        'Preencha nome, categoria, subcategoria e serviço antes de enviar para aprovação.',
+      );
+    }
     this.validateVersion(version.localizations, version.variables);
     const checksum = this.checksum(version.localizations, version.variables);
     const team = await this.prisma.team.findUnique({
@@ -648,40 +1236,54 @@ export class WorkflowService {
       select: { teamId: true, role: true },
     });
     const teamIds = [...new Set(memberships.map(({ teamId }) => teamId))];
-    const communications = teamIds.length
+    const teamCommunications = teamIds.length
       ? await this.prisma.communication.findMany({
           where: { ownerTeamId: { in: teamIds } },
           select: { id: true, code: true, name: true, ownerTeamId: true },
         })
       : [];
-    const versions = communications.length
-      ? await this.prisma.communicationVersion.findMany({
-          where: {
-            communicationId: { in: communications.map(({ id }) => id) },
-            status: {
-              in: [
-                'DRAFT',
-                'CHANGES_REQUESTED',
-                'IN_REVIEW',
-                'APPROVED',
-                'SCHEDULED',
-                'DEPLOY_FAILED',
-              ],
-            },
-          },
-          orderBy: { updatedAt: 'desc' },
-          select: {
-            id: true,
-            communicationId: true,
-            version: true,
-            status: true,
-            changeSummary: true,
-            createdById: true,
-            updatedAt: true,
-            effectiveAt: true,
-          },
+    const teamCommunicationIds = teamCommunications.map(({ id }) => id);
+    const versions = await this.prisma.communicationVersion.findMany({
+      where: {
+        OR: [
+          { createdById: actor.id },
+          ...(teamCommunicationIds.length
+            ? [{ communicationId: { in: teamCommunicationIds } }]
+            : []),
+        ],
+        status: {
+          in: [
+            'DRAFT',
+            'CHANGES_REQUESTED',
+            'IN_REVIEW',
+            'APPROVED',
+            'SCHEDULED',
+            'DEPLOY_FAILED',
+          ],
+        },
+      },
+      orderBy: { updatedAt: 'desc' },
+      select: {
+        id: true,
+        communicationId: true,
+        version: true,
+        status: true,
+        changeSummary: true,
+        createdById: true,
+        updatedAt: true,
+        effectiveAt: true,
+      },
+    });
+    const missingCommunicationIds = [
+      ...new Set(versions.map(({ communicationId }) => communicationId)),
+    ].filter((id) => !teamCommunicationIds.includes(id));
+    const creatorCommunications = missingCommunicationIds.length
+      ? await this.prisma.communication.findMany({
+          where: { id: { in: missingCommunicationIds } },
+          select: { id: true, code: true, name: true, ownerTeamId: true },
         })
       : [];
+    const communications = [...teamCommunications, ...creatorCommunications];
     const communicationById = new Map(
       communications.map((communication) => [communication.id, communication]),
     );
@@ -699,6 +1301,13 @@ export class WorkflowService {
       const teamId = item.communication?.ownerTeamId;
       return Boolean(teamId && rolesByTeam.get(teamId)?.has(role));
     };
+    const submittedRequests = await this.prisma.approvalRequest.findMany({
+      where: { submittedById: actor.id, outcome: 'PENDING' },
+      select: { versionId: true },
+    });
+    const submittedVersionIds = new Set(
+      submittedRequests.map(({ versionId }) => versionId),
+    );
     return {
       status: true,
       data: {
@@ -709,6 +1318,10 @@ export class WorkflowService {
         ),
         reviews: enriched.filter(
           (item) => item.status === 'IN_REVIEW' && hasRole(item, 'APPROVER'),
+        ),
+        submitted: enriched.filter(
+          (item) =>
+            item.status === 'IN_REVIEW' && submittedVersionIds.has(item.id),
         ),
         readyToDeploy: enriched.filter(
           (item) => item.status === 'APPROVED' && hasRole(item, 'PUBLISHER'),
