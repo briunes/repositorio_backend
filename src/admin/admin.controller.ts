@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
   Param,
   Patch,
   Post,
@@ -87,6 +88,21 @@ export class AdminController {
   @Get('sync-runs')
   syncRuns() {
     return this.admin.syncRuns();
+  }
+
+  @Get('sessions')
+  sessions(@Headers('x-repo-session-id') currentSessionId?: string) {
+    return this.admin.sessions(currentSessionId);
+  }
+
+  @Delete('sessions/:id')
+  revokeSession(@Param('id') id: string) {
+    return this.admin.revokeSession(id);
+  }
+
+  @Delete('sessions')
+  revokeAllSessions() {
+    return this.admin.revokeAllSessions();
   }
 
   @Get('settings')

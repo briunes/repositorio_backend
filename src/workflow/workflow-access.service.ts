@@ -32,6 +32,7 @@ export class WorkflowAccessService {
         name: true,
         ownerTeamId: true,
         channelId: true,
+        channel: { select: { key: true } },
       },
     });
     if (!communication)

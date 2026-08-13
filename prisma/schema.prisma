@@ -154,9 +154,26 @@ model User {
   approvalDecisions       ApprovalDecision[]     @relation("ApprovalReviewer")
   requestedDeployments    Deployment[]           @relation("DeploymentRequester")
   notifications           Notification[]
+  sessions                UserSession[]
 
   @@index([status])
   @@map("users")
+}
+
+model UserSession {
+  id             String    @id @default(cuid())
+  userId         String    @map("user_id")
+  ipAddress      String?   @map("ip_address") @db.VarChar(45)
+  userAgent      String?   @map("user_agent") @db.VarChar(500)
+  createdAt      DateTime  @default(now()) @map("created_at")
+  lastActivityAt DateTime  @default(now()) @map("last_activity_at")
+  expiresAt      DateTime  @map("expires_at")
+  revokedAt      DateTime? @map("revoked_at")
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt, expiresAt])
+  @@index([lastActivityAt])
+  @@map("user_sessions")
 }
 
 model Role {
@@ -697,7 +714,7 @@ model SystemConfig {
   defaultPageSize        Int      @default(48) @map("default_page_size")
   defaultSort            String   @default("name-asc") @map("default_sort") @db.VarChar(40)
   showInactive           Boolean  @default(true) @map("show_inactive")
-  sessionDurationMinutes Int      @default(480) @map("session_duration_minutes")
+  sessionDurationMinutes Int      @default(60) @map("session_duration_minutes")
   idleTimeoutMinutes     Int      @default(60) @map("idle_timeout_minutes")
   maintenanceMode        Boolean  @default(false) @map("maintenance_mode")
   readOnlyMode           Boolean  @default(false) @map("read_only_mode")
